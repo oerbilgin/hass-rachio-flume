@@ -1,6 +1,6 @@
 {
-  "domain": "integration_blueprint",
-  "name": "Integration blueprint",
+  "domain": "rachio_flume",
+  "name": "Rachio Flume",
   "codeowners": [
     "@ludeeus"
   ],
