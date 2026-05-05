@@ -39,7 +39,6 @@ logger = logging.getLogger(__name__)
 
 FLUME_DATETIME_FORMAT = "%Y-%m-%d %H:%M:%S"
 
-
 def safe_request(url: str, timeout: int = 10, method=requests.get, **kwargs) -> dict:
     """Make an HTTP request and return parsed JSON or an empty dict on failure.
 
@@ -68,8 +67,8 @@ class FlumeDevice:
 
     device_id: str
     device_name: str
-    device_timezone: str | None = None
-    device_type: DeviceType = DeviceType.UNKNOWN
+    device_timezone: str
+    device_type: DeviceType
 
 class FlumeTokenError(Exception):
     """Raised when Flume does not return an access token."""
@@ -137,6 +136,7 @@ class FlumeUsageQuery(BaseModel):
         default="GALLONS",
         description="Unit of measurement used for returned water usage values.",
     )
+    types: list[str] = Field(default=['all'], description="")
 
     @field_validator("since_datetime", "until_datetime", mode="before")
     @classmethod
@@ -287,7 +287,7 @@ class FlumeClient:
             raise FlumeDeviceError(f"No Flume monitor devices found: '{self.devices}'")
         return monitors
 
-    def query_usage(self, device_id: str, queries: list[dict], max_query_n: int = 10):
+    def query_usage(self, device_id: str, queries: list[FlumeUsageQuery], max_query_n: int = 10):
         """Execute one or more Flume usage queries and return a combined DataFrame."""
         url = (
             f"https://api.flumewater.com/users/{self.user_id}/devices/{device_id}/query"
@@ -296,12 +296,13 @@ class FlumeClient:
             "Content-Type": "application/json",
             "Authorization": f"Bearer {self.token}",
         }
+        # chunk queries into groups of max_query_n to avoid overwhelming the Flume API
         qlist = [
             queries[i : i + max_query_n] for i in range(0, len(queries), max_query_n)
         ]
         data_collect = []
         for q in qlist:
-            payload = {"queries": q}
+            payload = {"queries": [query.as_payload() for query in q]}
             result = safe_request(
                 url, method=requests.post, json=payload, headers=headers
             )
@@ -392,7 +393,7 @@ class RachioClient:
 def _create_query_list(
     todays_watering: pd.DataFrame,
     time_offset_minutes: int = 0,
-) -> list[dict]:
+) -> list[FlumeUsageQuery]:
     """Build one Flume query per watered zone using the Rachio time windows."""
     time_offset = datetime.timedelta(minutes=time_offset_minutes)
     query_list = [
@@ -400,7 +401,7 @@ def _create_query_list(
             request_id=row["zone_name"],
             since_datetime=row["last_watering_start_time"] - time_offset,
             until_datetime=row["last_watering_stop_time"] + time_offset,
-        ).as_payload()
+        )
         for _, row in todays_watering.iterrows()
     ]
     return query_list
@@ -448,11 +449,11 @@ def poll_for_irrigation_usage(
     monitor = flume_client.monitors[flume_device_index]
     rachio_client = RachioClient(token=rachio_token)
     todays_watering = rachio_client.get_last_watered_summary(
-        local_timezone=monitor["device_timezone"]
+        local_timezone=monitor.device_timezone
     )
     query_list = _create_query_list(todays_watering=todays_watering)
     water_data = flume_client.query_usage(
-        device_id=monitor["device_id"], queries=query_list
+        device_id=monitor.device_id, queries=query_list
     )
     water_data = water_data.rename({"request_id": "zone_name"}, axis=1)
     if water_data is None or water_data.empty:
@@ -478,9 +479,9 @@ def poll_for_irrigation_usage(
 
 if __name__ == "__main__":
     import os
-    from dotenv import load_dotenv
+    # from dotenv import load_dotenv
 
-    load_dotenv("../.env")
+    # load_dotenv("../.env")
 
     flume_user = os.environ["flume_user"]
     flume_pass = os.environ["flume_pass"]
