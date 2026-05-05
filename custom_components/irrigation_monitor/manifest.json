@@ -1,0 +1,19 @@
+{
+  "domain": "irrigation_monitor",
+  "name": "Irrigation Monitor",
+  "config_flow": true,
+  "documentation": "https://example.local/irrigation_monitor",
+  "iot_class": "cloud_polling",
+  "loggers": [
+    "custom_components.irrigation_monitor"
+  ],
+  "version": "0.1.0",
+  "requirements": [
+    "python-slugify==8.0.4",
+    "pandas==2.3.3",
+    "pytz==2023.3",
+    "requests==2.32.5"
+  ],
+  "dependencies": [],
+  "codeowners": []
+}
