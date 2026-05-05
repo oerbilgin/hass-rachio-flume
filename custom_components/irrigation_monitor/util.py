@@ -372,6 +372,10 @@ class FlumeClient:
             return df
         return pd.DataFrame()
 
+class RachioClientError(Exception):
+    """Raised when Rachio API requests fail"""
+
+    pass
 
 class RachioClient:
     """Minimal synchronous client for the Rachio API.
@@ -382,23 +386,34 @@ class RachioClient:
 
     def __init__(self, token: str):
         """Store the token and resolve the current Rachio person ID."""
-        self.token = token
-        self.person_id = self._get_person_id()
+        self._token = token
+        self._person_id = self._get_person_id()
 
-    def _get_person_id(self):
+    def _get_person_id(self) -> str:
         """Fetch the authenticated Rachio account identifier."""
-        r = safe_request(
-            "https://api.rach.io/1/public/person/info",
-            headers={"Authorization": f"Bearer {self.token}"},
-        )
-        return r.get("id")
+        try:
+            r = safe_request(
+                "https://api.rach.io/1/public/person/info",
+                headers={"Authorization": f"Bearer {self._token}"},
+            )
+        except Exception as exception:
+            raise RachioClientError("Request to get Rachio person ID failed") from exception
+        if not isinstance(r, dict):
+            raise RachioClientError(f"Unexpected Rachio person info response format: '{r}'")
 
-    def _get_my_rachio_info(self):
+        if not (person_id := r.get("id")):
+            raise RachioClientError(f"No 'id' field in Rachio person info response: '{r}'")
+        return person_id
+
+    def _get_my_rachio_info(self) -> dict[str, Any]:
         """Fetch the full Rachio person payload, including devices and zones."""
-        return safe_request(
-            f"https://api.rach.io/1/public/person/{self.person_id}",
-            headers={"Authorization": f"Bearer {self.token}"},
-        )
+        try:
+            return safe_request(
+                f"https://api.rach.io/1/public/person/{self._person_id}",
+                headers={"Authorization": f"Bearer {self._token}"},
+            )
+        except Exception as exception:
+            raise RachioClientError("Request to get Rachio person info failed") from exception
 
     @staticmethod
     def _get_last_water_time_for_zone(zone_info, local_timezone: str = "US/Pacific"):
