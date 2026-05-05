@@ -39,6 +39,31 @@ logger = logging.getLogger(__name__)
 
 FLUME_DATETIME_FORMAT = "%Y-%m-%d %H:%M:%S"
 
+FlumeApplianceType = Literal[
+    "ALL",
+    "OUTDOOR",
+    "IRRIGATION",
+    "SPRINKLER",
+    "HOSE",
+    "DRIP",
+    "SOAKER_HOSE",
+    "POOL",
+    "INDOOR",
+    "MECHANICAL",
+    "CLOTHES_WASHER",
+    "DISH_WASHER",
+    "TOILET",
+    "HUMIDIFIER",
+    "SOFTENER",
+    "DISCRETIONARY",
+    "FAUCET",
+    "TUB",
+    "SHOWER",
+    "LEAK",
+    "FLAPPER_LEAK",
+    "REVERSE_OSMOSIS",
+]
+
 def safe_request(url: str, timeout: int = 10, method=requests.get, **kwargs) -> dict:
     """Make an HTTP request and return parsed JSON or an empty dict on failure.
 
@@ -136,7 +161,18 @@ class FlumeUsageQuery(BaseModel):
         default="GALLONS",
         description="Unit of measurement used for returned water usage values.",
     )
-    types: list[str] = Field(default=['all'], description="")
+    types: list[FlumeApplianceType] = Field(
+        default_factory=lambda: ["ALL"],
+        min_length=1,
+        description=(
+            "Appliance categories to include in the query. Supported values "
+            "follow Flume's documented hierarchy: ALL, OUTDOOR, "
+            "IRRIGATION, SPRINKLER, HOSE, DRIP, SOAKER_HOSE, POOL, "
+            "INDOOR, MECHANICAL, CLOTHES_WASHER, DISH_WASHER, TOILET, "
+            "HUMIDIFIER, SOFTENER, DISCRETIONARY, FAUCET, TUB, SHOWER, "
+            "LEAK, FLAPPER_LEAK, and REVERSE_OSMOSIS."
+        ),
+    )
 
     @field_validator("since_datetime", "until_datetime", mode="before")
     @classmethod
@@ -155,6 +191,24 @@ class FlumeUsageQuery(BaseModel):
                 message = "Timestamp must be a datetime or an ISO-like string"
                 raise ValueError(message) from exception
         message = "Timestamp must be a datetime, pandas Timestamp, or string"
+        raise TypeError(message)
+
+    @field_validator("types", mode="before")
+    @classmethod
+    def _normalize_types(cls, value: Any) -> list[str]:
+        if value in (None, ""):
+            return ["ALL"]
+        if isinstance(value, str):
+            return [value.upper()]
+        if isinstance(value, list):
+            normalized = []
+            for item in value:
+                if not isinstance(item, str):
+                    message = "Each Flume appliance type must be a string"
+                    raise TypeError(message)
+                normalized.append(item.upper())
+            return normalized
+        message = "types must be a string or list of strings"
         raise TypeError(message)
 
     @staticmethod
