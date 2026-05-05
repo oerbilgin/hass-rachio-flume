@@ -21,7 +21,7 @@ import json
 import logging
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 import pandas as pd
 import pytz
@@ -87,14 +87,56 @@ class FlumeUsageQuery(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    request_id: str = Field(min_length=1)
-    bucket: str = Field(default="MIN", min_length=1)
-    since_datetime: datetime.datetime | str | None = None
-    until_datetime: datetime.datetime | str | None = None
-    group_multiplier: str | None = None
-    operation: str | None = None
-    sort_direction: str | None = None
-    units: str | None = "GALLONS"
+    request_id: str = Field(
+        min_length=1,
+        description=(
+            "Key used to identify this query in the Flume response when "
+            "multiple queries are sent together."
+        ),
+    )
+    bucket: Literal["MIN", "HR", "DAY", "MON", "YR"] = Field(
+        default="MIN",
+        description="Bucket grouping used for the usage data query.",
+    )
+    since_datetime: datetime.datetime | str = Field(
+        description=(
+            "Restrict the query range to samples since this datetime. The "
+            "value has no offset and represents time in the device timezone. "
+            "Up to one year of data can be queried."
+        ),
+    )
+    until_datetime: datetime.datetime | str | None = Field(
+        default_factory=datetime.datetime.now,
+        description=(
+            "Restrict the query range to samples until this datetime. The "
+            "value has no offset and represents time in the device timezone. "
+            "Defaults to now. Up to one year of data can be queried."
+        ),
+    )
+    group_multiplier: int = Field(
+        default=1,
+        ge=1,
+        le=100,
+        description=(
+            "Multiplier applied to the bucket grouping. For example, a "
+            "group_multiplier of 3 with bucket MON groups data in 3-month "
+            "intervals."
+        ),
+    )
+    operation: Literal["SUM", "AVG", "MIN", "MAX", "CNT"] | None = Field(
+        default=None,
+        description="Optional aggregate operation applied to the query results.",
+    )
+    sort_direction: Literal["ASC", "DESC"] = Field(
+        default="ASC",
+        description="Sort order for the returned query results.",
+    )
+    units: Literal[
+        "GALLONS", "LITERS", "CUBIC_FEET", "CUBIC_METERS"
+    ] = Field(
+        default="GALLONS",
+        description="Unit of measurement used for returned water usage values.",
+    )
 
     @field_validator("since_datetime", "until_datetime", mode="before")
     @classmethod
@@ -245,29 +287,6 @@ class FlumeClient:
             raise FlumeDeviceError(f"No Flume monitor devices found: '{self.devices}'")
         return monitors
 
-    @staticmethod
-    def create_single_query(
-        request_id: str,
-        bucket: str = "MIN",
-        start_time: datetime.datetime | pd.Timestamp | str | None = None,
-        end_time: datetime.datetime | pd.Timestamp | str | None = None,
-        group_multiplier: str | None = None,
-        operation: str | None = None,
-        sort_direction: str | None = None,
-        units: str | None = "GALLONS",
-    ) -> dict[str, Any]:
-        """Build one Flume usage query payload for a requested time range."""
-        return FlumeUsageQuery(
-            request_id=request_id,
-            bucket=bucket,
-            since_datetime=start_time,
-            until_datetime=end_time,
-            group_multiplier=group_multiplier,
-            operation=operation,
-            sort_direction=sort_direction,
-            units=units,
-        ).as_payload()
-
     def query_usage(self, device_id: str, queries: list[dict], max_query_n: int = 10):
         """Execute one or more Flume usage queries and return a combined DataFrame."""
         url = (
@@ -371,18 +390,17 @@ class RachioClient:
 
 
 def _create_query_list(
-    flume_client: FlumeClient,
     todays_watering: pd.DataFrame,
     time_offset_minutes: int = 0,
 ) -> list[dict]:
     """Build one Flume query per watered zone using the Rachio time windows."""
     time_offset = datetime.timedelta(minutes=time_offset_minutes)
     query_list = [
-        flume_client.create_single_query(
+        FlumeUsageQuery(
             request_id=row["zone_name"],
-            start_time=row["last_watering_start_time"] - time_offset,
-            end_time=row["last_watering_stop_time"] + time_offset,
-        )
+            since_datetime=row["last_watering_start_time"] - time_offset,
+            until_datetime=row["last_watering_stop_time"] + time_offset,
+        ).as_payload()
         for _, row in todays_watering.iterrows()
     ]
     return query_list
@@ -432,9 +450,7 @@ def poll_for_irrigation_usage(
     todays_watering = rachio_client.get_last_watered_summary(
         local_timezone=monitor["device_timezone"]
     )
-    query_list = _create_query_list(
-        flume_client=flume_client, todays_watering=todays_watering
-    )
+    query_list = _create_query_list(todays_watering=todays_watering)
     water_data = flume_client.query_usage(
         device_id=monitor["device_id"], queries=query_list
     )
