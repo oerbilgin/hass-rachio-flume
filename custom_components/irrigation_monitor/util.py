@@ -17,12 +17,14 @@ report itself, this is usually the module to inspect first.
 
 import base64
 import datetime
+from functools import total_ordering
 import json
 import logging
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Literal, cast
 
+from attr import field
 import pandas as pd
 import pytz
 from pydantic import (
@@ -107,7 +109,10 @@ class FlumeDeviceError(Exception):
 
 
 class FlumeUsageQuery(BaseModel):
-    """Validate and serialize one Flume usage query payload."""
+    """Validate and serialize one Flume usage query payload.
+    TODO: lock down how i actually use it (e.g. operation none vs sum)
+          and remove options i dont actually use- dont want to add unnecessary complexity
+    """
 
     model_config = ConfigDict(extra="forbid")
 
@@ -161,8 +166,8 @@ class FlumeUsageQuery(BaseModel):
         default="GALLONS",
         description="Unit of measurement used for returned water usage values.",
     )
-    types: list[FlumeApplianceType] = Field(
-        default_factory=lambda: ["ALL"],
+    types: list[FlumeApplianceType] | None= Field(
+        default=None,
         min_length=1,
         description=(
             "Appliance categories to include in the query. Supported values "
@@ -243,6 +248,11 @@ class FlumeUsageQuery(BaseModel):
     def as_payload(self) -> dict[str, Any]:
         """Return the validated Flume payload with omitted null fields."""
         return self.model_dump(exclude_none=True)
+
+@dataclass
+class FlumeRequestData:
+    request_id: str
+    total_usage: float
 
 class FlumeClient:
     """Minimal synchronous client for the Flume API.
@@ -341,7 +351,7 @@ class FlumeClient:
             raise FlumeDeviceError(f"No Flume monitor devices found: '{self.devices}'")
         return monitors
 
-    def query_usage(self, device_id: str, queries: list[FlumeUsageQuery], max_query_n: int = 10):
+    def query_usage(self, device_id: str, queries: list[FlumeUsageQuery], max_query_n: int = 10) -> list[FlumeRequestData]:
         """Execute one or more Flume usage queries and return a combined DataFrame."""
         url = (
             f"https://api.flumewater.com/users/{self.user_id}/devices/{device_id}/query"
@@ -363,19 +373,31 @@ class FlumeClient:
             if result:
                 for query_result in result.get("data", []):
                     for request_id, data in query_result.items():
-                        tmp = pd.DataFrame(data)
-                        tmp["request_id"] = request_id
-                        data_collect.append(tmp)
-        if data_collect:
-            df = pd.concat(data_collect)
-            df["datetime"] = pd.to_datetime(df["datetime"])
-            return df
-        return pd.DataFrame()
+                        data_collect.append(
+                            FlumeRequestData(
+                                request_id=request_id,
+                                total_usage=data[0].get("value"),
+                            )
+                        )
+        return data_collect
+
 
 class RachioClientError(Exception):
     """Raised when Rachio API requests fail"""
 
     pass
+
+@dataclass
+class RachioZoneWateringSummary:
+    zone_id: int
+    zone_name: str
+    last_watering_start_time: datetime.datetime
+    last_watering_stop_time: datetime.datetime
+    last_watering_duration_minutes: float
+    est_gallons_per_minute: float
+    est_gallons_used: float
+    sqft: int
+    enabled: bool
 
 class RachioClient:
     """Minimal synchronous client for the Rachio API.
@@ -416,7 +438,7 @@ class RachioClient:
             raise RachioClientError("Request to get Rachio person info failed") from exception
 
     @staticmethod
-    def _get_last_water_time_for_zone(zone_info, local_timezone: str = "US/Pacific"):
+    def _get_last_water_time_for_zone(zone_info:dict[str, Any], local_timezone: str = "US/Pacific") -> RachioZoneWateringSummary:
         """Convert one Rachio zone payload into a normalized watering summary row."""
         watering_duration = zone_info["lastWateredDuration"]
         watering_duration_td = datetime.timedelta(seconds=watering_duration)
@@ -431,20 +453,22 @@ class RachioClient:
         gpm = 0.62 * sqft * inph / 60
         m = (last_water_stop_datetime - last_water_start_datetime).seconds / 60
         est_gallons = m * gpm
-        return {
-            "zone_id": zone_info["zoneNumber"],
-            "zone_name": zone_info["name"],
-            "last_watering_start_time": last_water_start_datetime,
-            "last_watering_stop_time": last_water_stop_datetime,
-            "est_gallons_per_minute": gpm,
-            "est_gallons_used": est_gallons,
-            "sqft": zone_info["yardAreaSquareFeet"],
-            "enabled": zone_info["enabled"],
-        }
+
+        return RachioZoneWateringSummary(
+            zone_id=zone_info["zoneNumber"],
+            zone_name=zone_info["name"],
+            last_watering_start_time=last_water_start_datetime,
+            last_watering_stop_time=last_water_stop_datetime,
+            last_watering_duration_minutes=m,
+            est_gallons_per_minute=gpm,
+            est_gallons_used=est_gallons,
+            sqft=zone_info["yardAreaSquareFeet"],
+            enabled=zone_info["enabled"],
+        )
 
     def get_last_watered_summary(
         self, enabled_only=True, local_timezone: str = "US/Pacific"
-    ):
+    ) -> list[RachioZoneWateringSummary]:
         """Return a DataFrame summarizing the most recent watering per zone."""
         r = self._get_my_rachio_info()
         collect = []
@@ -456,22 +480,23 @@ class RachioClient:
                     zone_info, local_timezone=local_timezone
                 )
             )
-        return pd.DataFrame(collect)
+        return collect
 
 
 def _create_query_list(
-    todays_watering: pd.DataFrame,
+    todays_watering: list[RachioZoneWateringSummary],
     time_offset_minutes: int = 0,
 ) -> list[FlumeUsageQuery]:
     """Build one Flume query per watered zone using the Rachio time windows."""
     time_offset = datetime.timedelta(minutes=time_offset_minutes)
     query_list = [
         FlumeUsageQuery(
-            request_id=row["zone_name"],
-            since_datetime=row["last_watering_start_time"] - time_offset,
-            until_datetime=row["last_watering_stop_time"] + time_offset,
+            request_id=zws.zone_name,
+            since_datetime=zws.last_watering_start_time - time_offset,
+            until_datetime=zws.last_watering_stop_time + time_offset,
+            operation='SUM'
         )
-        for _, row in todays_watering.iterrows()
+        for zws in todays_watering
     ]
     return query_list
 
@@ -491,6 +516,23 @@ def _summarize_watering(grp):
     return pd.Series(data)
 
 
+
+class WaterReportDataPoint(BaseModel):
+    zone_name: str = Field(..., description="Name of the watered zone as reported by Rachio.")
+    zone_id: int = Field(..., description="Identifier of the watered zone as reported by Rachio.")
+    last_watering_start_time: datetime.datetime = Field(..., description="Start time of the most recent watering event for this zone as reported by Rachio.")
+    last_watering_stop_time: datetime.datetime = Field(..., description="Stop time of the most recent watering event for this zone as reported by Rachio.")
+    total_gallons: float = Field(...,
+        description="Total gallons used during the watering window as measured by Flume."
+    )
+    total_watering_minutes: float = Field(...,
+        description="Total minutes of watering during the window as measured by Flume."
+    )
+    gallons_per_minute: float = Field(...,
+        description="Average gallons per minute during the watering window as measured by Flume."
+    )
+
+
 def poll_for_irrigation_usage(
     flume_user: str,
     flume_pass: str,
@@ -498,7 +540,7 @@ def poll_for_irrigation_usage(
     flume_client_secret: str,
     rachio_token: str,
     flume_device_index: int = 0,
-) -> pd.DataFrame:
+) -> list[WaterReportDataPoint]:
     """
     Build the integration's final irrigation report.
 
@@ -524,26 +566,35 @@ def poll_for_irrigation_usage(
     water_data = flume_client.query_usage(
         device_id=monitor.device_id, queries=query_list
     )
-    water_data = water_data.rename({"request_id": "zone_name"}, axis=1)
-    if water_data is None or water_data.empty:
-        # No water data returned; create an empty summary with expected columns
-        water_data_summary = pd.DataFrame(
-            columns=[
-                "zone_name",
-                "total_gallons",
-                "total_watering_minutes",
-                "gallons_per_minute",
-            ]
-        )
-    else:
-        water_data_summary = (
-            water_data
-            .groupby("zone_name")
-            .apply(_summarize_watering, include_groups=False)  # type: ignore
-            .reset_index()
-        )
-    irrigation_report = water_data_summary.merge(todays_watering, how="right")
-    return irrigation_report
+    # TODO: can we get away from pandas here? groupby ops taken care of with Flume, merge can be done with dict keys
+    # if not water_data:
+    #     # No water data returned; create an empty summary with expected columns
+    #     water_data_summary = pd.DataFrame(
+    #         columns=[
+    #             "zone_name",
+    #             "total_gallons",
+    #             "total_watering_minutes",
+    #             "gallons_per_minute",
+    #         ]
+    #     )
+
+    # else:
+    #     water_data_df = pd.DataFrame(water_data)
+    #     water_data_df = water_data_df.rename({"request_id": "zone_name"}, axis=1)
+    #     water_data_df["datetime"] = pd.to_datetime(water_data_df["datetime"])
+    #     water_data_summary = (
+    #         water_data_df
+    #         .groupby("zone_name")
+    #         .apply(_summarize_watering, include_groups=False)  # type: ignore
+    #         .reset_index()
+    #     )
+    # irrigation_report = water_data_summary.merge(pd.DataFrame(todays_watering), how="right")
+    # if irrigation_report.empty:
+    #     return []
+    # return [
+    #     WaterReportDataPoint(**{str(key): value for key, value in x.items()})
+    #     for x in irrigation_report.to_dict(orient="records")
+    # ]
 
 
 if __name__ == "__main__":
