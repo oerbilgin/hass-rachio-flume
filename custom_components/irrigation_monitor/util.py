@@ -79,10 +79,8 @@ class FlumeTokenError(Exception):
     """Raised when Flume does not return an access token."""
 
 
-
 class FlumeDeviceError(Exception):
     """Raised when the expected Flume device is not found."""
-
 
 
 class FlumeUsageQuery(BaseModel):
@@ -336,7 +334,6 @@ class RachioClientError(Exception):
     """Raised when Rachio API requests fail"""
 
 
-
 @dataclass
 class RachioZoneWateringSummary:
     zone_id: int
@@ -550,26 +547,3 @@ def poll_for_irrigation_usage(
         report_data.append(datapoint)
 
     return report_data
-
-
-if __name__ == "__main__":
-    import os
-    # from dotenv import load_dotenv
-
-    # load_dotenv("../.env")
-
-    flume_user = os.environ["flume_user"]
-    flume_pass = os.environ["flume_pass"]
-    flume_client_id = os.environ["flume_client_id"]
-    flume_client_secret = os.environ["flume_client_secret"]
-    rachio_token = os.environ["rachio_token"]
-
-    report = poll_for_irrigation_usage(
-        flume_user=flume_user,
-        flume_pass=flume_pass,
-        flume_client_id=flume_client_id,
-        flume_client_secret=flume_client_secret,
-        rachio_token=rachio_token,
-        flume_device_index=0,
-    )
-    print(report)
