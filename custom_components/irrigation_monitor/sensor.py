@@ -164,7 +164,7 @@ class IrrigationZoneLastWateringSensor(IrrigationZoneReportEntity):
         self._attr_unique_id = (
             f"{coordinator.config_entry.entry_id}_{self._zone_key}"
         ).lower()
-        self._attr_name = f"Irrigation {zone_name} last watering event"
+        self._attr_name = f"Zone {zone_name} last watering event"
         self._attr_device_class = SensorDeviceClass.TIMESTAMP
 
     @property
@@ -197,7 +197,7 @@ class IrrigationZoneWaterUsedSensor(IrrigationZoneReportEntity):
         self._attr_unique_id = (
             f"{coordinator.config_entry.entry_id}_{self._zone_key}_water_used"
         ).lower()
-        self._attr_name = f"Irrigation {zone_name} water used"
+        self._attr_name = f"Zone {zone_name} water used"
 
     @property
     def native_value(self) -> float | None:
@@ -228,7 +228,7 @@ class IrrigationZoneWaterTotalSensor(IrrigationZoneReportEntity, RestoreEntity):
         self._attr_unique_id = (
             f"{coordinator.config_entry.entry_id}_{self._zone_key}_water_total"
         ).lower()
-        self._attr_name = f"Irrigation {zone_name} total water used"
+        self._attr_name = f"Zone {zone_name} total water used"
         self._accumulated_gallons: float | None = None
         self._last_processed_event_id: str | None = None
 
