@@ -18,6 +18,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from homeassistant.components.sensor import SensorDeviceClass, SensorEntity
+from homeassistant.const import UnitOfVolume
 
 from .entity import IrrigationMonitorEntity
 
@@ -49,7 +50,15 @@ async def async_setup_entry(
         return
 
     async_add_entities(
-        IrrigationZoneSensor(
+        IrrigationZoneLastWateringSensor(
+            coordinator=entry.runtime_data.coordinator,
+            zone_name=row.zone_name or "unknown",
+            zone_id=row.zone_id,
+        )
+        for row in report
+    )
+    async_add_entities(
+        IrrigationZoneWaterUsedSensor(
             coordinator=entry.runtime_data.coordinator,
             zone_name=row.zone_name or "unknown",
             zone_id=row.zone_id,
@@ -58,9 +67,9 @@ async def async_setup_entry(
     )
 
 
-class IrrigationZoneSensor(IrrigationMonitorEntity, SensorEntity):
+class IrrigationZoneReportEntity(IrrigationMonitorEntity, SensorEntity):
     """
-    Represent one irrigation zone as a Home Assistant sensor.
+    Represent one irrigation zone backed by the shared report.
 
     The entity looks up its current values from the coordinator's shared report
     instead of storing independent state. That keeps refresh logic centralized.
@@ -77,21 +86,7 @@ class IrrigationZoneSensor(IrrigationMonitorEntity, SensorEntity):
         self._zone_name = zone_name
         self._zone_id = zone_id
         zone_key = str(zone_id if zone_id is not None else zone_name).replace(" ", "_")
-        self._attr_unique_id = f"{coordinator.config_entry.entry_id}_{zone_key}".lower()
-        self._attr_name = f"Irrigation {zone_name} last watering"
-        self._attr_device_class = SensorDeviceClass.TIMESTAMP
-
-    @property
-    def native_value(self) -> datetime.datetime | None:
-        """
-        Expose the zone's watering start time as the sensor state.
-
-        This makes HomeAssistant record each new watering event in the history.
-        """
-        datapoint = self._report_datapoint
-        if datapoint is None:
-            return None
-        return datapoint.watering_start_time
+        self._zone_key = zone_key
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
@@ -99,7 +94,18 @@ class IrrigationZoneSensor(IrrigationMonitorEntity, SensorEntity):
         datapoint = self._report_datapoint
         if datapoint is None:
             return {}
-        return datapoint.model_dump(mode="json")
+        event_data = datapoint.model_dump(mode="json")
+        event_data["event_id"] = self._event_id
+        return event_data
+
+    @property
+    def _event_id(self) -> str | None:
+        """Return a stable identifier for the latest watering event."""
+        datapoint = self._report_datapoint
+        if datapoint is None:
+            return None
+        start_time = datapoint.watering_start_time.isoformat()
+        return f"{datapoint.zone_id}:{start_time}"
 
     @property
     def _report_datapoint(self) -> WaterReportDataPoint | None:
@@ -115,3 +121,63 @@ class IrrigationZoneSensor(IrrigationMonitorEntity, SensorEntity):
                 return datapoint
 
         return None
+
+
+class IrrigationZoneLastWateringSensor(IrrigationZoneReportEntity):
+    """Represent the latest watering event marker for one zone."""
+
+    def __init__(
+        self,
+        coordinator: IrrigationMonitorDataUpdateCoordinator,
+        zone_name: str,
+        zone_id: int | None,
+    ) -> None:
+        """Create the event timestamp sensor for one irrigation zone."""
+        super().__init__(coordinator, zone_name, zone_id)
+        self._attr_unique_id = (
+            f"{coordinator.config_entry.entry_id}_{self._zone_key}"
+        ).lower()
+        self._attr_name = f"Irrigation {zone_name} last watering event"
+        self._attr_device_class = SensorDeviceClass.TIMESTAMP
+
+    @property
+    def native_value(self) -> datetime.datetime | None:
+        """
+        Expose the zone's watering start time as the sensor state.
+
+        This makes HomeAssistant record each new watering event in the history.
+        """
+        datapoint = self._report_datapoint
+        if datapoint is None:
+            return None
+        return datapoint.watering_start_time
+
+
+class IrrigationZoneWaterUsedSensor(IrrigationZoneReportEntity):
+    """Represent gallons used during the latest watering event for one zone."""
+
+    _attr_device_class = SensorDeviceClass.WATER
+    _attr_native_unit_of_measurement = UnitOfVolume.GALLONS
+
+    def __init__(
+        self,
+        coordinator: IrrigationMonitorDataUpdateCoordinator,
+        zone_name: str,
+        zone_id: int | None,
+    ) -> None:
+        """Create the per-event water usage sensor for one irrigation zone."""
+        super().__init__(coordinator, zone_name, zone_id)
+        self._attr_unique_id = (
+            f"{coordinator.config_entry.entry_id}_{self._zone_key}_water_used"
+        ).lower()
+        self._attr_name = f"Irrigation {zone_name} water used"
+
+    @property
+    def native_value(self) -> float | None:
+        """Expose gallons used during the latest watering event."""
+        datapoint = self._report_datapoint
+        if datapoint is None:
+            return None
+        if datapoint.total_gallons_used is None:
+            return None
+        return float(datapoint.total_gallons_used)
