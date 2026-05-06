@@ -1,4 +1,5 @@
-"""Provide shared entity behavior for Irrigation Monitor platforms.
+"""
+Provide shared entity behavior for Irrigation Monitor platforms.
 
 This module defines the base entity class that platform-specific entities can
 inherit from.

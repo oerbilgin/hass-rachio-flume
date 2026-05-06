@@ -1,4 +1,5 @@
-"""Define the UI configuration flow for Irrigation Monitor.
+"""
+Define the UI configuration flow for Irrigation Monitor.
 
 Home Assistant uses this module when a user adds the integration through the
 Settings -> Devices & Services UI.
@@ -27,19 +28,20 @@ from .api import (
     IrrigationMonitorApiClientError,
 )
 from .const import (
-    DOMAIN,
-    LOGGER,
-    CONF_FLUME_USER,
-    CONF_FLUME_PASS,
     CONF_FLUME_CLIENT_ID,
     CONF_FLUME_CLIENT_SECRET,
-    CONF_RACHIO_TOKEN,
     CONF_FLUME_DEVICE_INDEX,
+    CONF_FLUME_PASS,
+    CONF_FLUME_USER,
+    CONF_RACHIO_TOKEN,
+    DOMAIN,
+    LOGGER,
 )
 
 
 class IrrigationConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
-    """Collect credentials from the UI and create one config entry.
+    """
+    Collect credentials from the UI and create one config entry.
 
     A config flow is Home Assistant's wizard-like setup object. This class owns
     the user-facing form, handles validation, and decides when an integration
@@ -61,7 +63,8 @@ class IrrigationConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self,
         user_input: dict | None = None,
     ) -> config_entries.ConfigFlowResult:
-        """Show and process the main setup form.
+        """
+        Show and process the main setup form.
 
         On first display this returns the form schema. Once the user submits
         credentials, it validates them, assigns a stable unique ID, and creates

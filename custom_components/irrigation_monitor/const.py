@@ -1,4 +1,5 @@
-"""Store shared constants for Irrigation Monitor.
+"""
+Store shared constants for Irrigation Monitor.
 
 This module keeps the integration domain name, config keys, attribution text,
 and logger in one place so other modules can import the same values instead of

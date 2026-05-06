@@ -17,14 +17,15 @@ report itself, this is usually the module to inspect first.
 
 import base64
 import datetime
-from functools import reduce
 import json
 import logging
 from dataclasses import dataclass
 from enum import Enum
+from functools import reduce
 from typing import Any, Literal, cast
 
 import pytz
+import requests
 from pydantic import (
     BaseModel,
     ConfigDict,
@@ -34,14 +35,15 @@ from pydantic import (
     field_validator,
     model_validator,
 )
-import requests
 
 logger = logging.getLogger(__name__)
 
 FLUME_DATETIME_FORMAT = "%Y-%m-%d %H:%M:%S"
 
+
 def safe_request(url: str, timeout: int = 10, method=requests.get, **kwargs) -> dict:
-    """Make an HTTP request and return parsed JSON or an empty dict on failure.
+    """
+    Make an HTTP request and return parsed JSON or an empty dict on failure.
 
     This helper keeps the lower-level client code compact and ensures request
     failures are logged in one place.
@@ -62,6 +64,7 @@ class DeviceType(Enum):
     BRIDGE = 1
     SENSOR = 2
 
+
 @dataclass
 class FlumeDevice:
     """Represent the Flume device metadata needed for queries and display."""
@@ -71,20 +74,19 @@ class FlumeDevice:
     device_timezone: str
     device_type: DeviceType
 
+
 class FlumeTokenError(Exception):
     """Raised when Flume does not return an access token."""
 
-    pass
+
 
 class FlumeDeviceError(Exception):
     """Raised when the expected Flume device is not found."""
 
-    pass
 
 
 class FlumeUsageQuery(BaseModel):
-    """Validate and serialize one Flume usage query payload.
-    """
+    """Validate and serialize one Flume usage query payload."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -110,9 +112,7 @@ class FlumeUsageQuery(BaseModel):
             "Defaults to now. Up to one year of data can be queried."
         ),
     )
-    units: Literal[
-        "GALLONS", "LITERS", "CUBIC_FEET", "CUBIC_METERS"
-    ] = Field(
+    units: Literal["GALLONS", "LITERS", "CUBIC_FEET", "CUBIC_METERS"] = Field(
         default="GALLONS",
         description="Unit of measurement used for returned water usage values.",
     )
@@ -141,9 +141,7 @@ class FlumeUsageQuery(BaseModel):
         return value.replace(tzinfo=None)
 
     @field_serializer("since_datetime", "until_datetime")
-    def _serialize_timestamp(
-        self, value: datetime.datetime | str | None
-    ) -> str | None:
+    def _serialize_timestamp(self, value: datetime.datetime | str | None) -> str | None:
         if value is None:
             return None
         if isinstance(value, str):
@@ -157,8 +155,7 @@ class FlumeUsageQuery(BaseModel):
             end_time = cast("datetime.datetime", self.until_datetime)
             if end_time < start_time:
                 message = (
-                    "until_datetime must be greater than or equal to "
-                    "since_datetime"
+                    "until_datetime must be greater than or equal to since_datetime"
                 )
                 raise ValueError(message)
         return self
@@ -172,11 +169,11 @@ class FlumeUsageQuery(BaseModel):
             "group_multiplier": 1,
         }
 
-
         payload = self.model_dump(exclude_none=True)
 
         payload = payload | static_options
         return payload
+
 
 @dataclass
 class FlumeRequestData:
@@ -187,8 +184,10 @@ class FlumeRequestData:
         """Convert the Flume request data into a dict format used for report generation."""
         return {self.request_id: self.total_usage}
 
+
 class FlumeClient:
-    """Minimal synchronous client for the Flume API.
+    """
+    Minimal synchronous client for the Flume API.
 
     This class handles authentication, device discovery, and water usage query
     requests for the selected Flume monitor.
@@ -223,16 +222,24 @@ class FlumeClient:
                 url, method=requests.post, json=payload, headers=headers
             )
         except Exception as exception:
-            raise FlumeTokenError("Request to get Flume access token failed") from exception
+            raise FlumeTokenError(
+                "Request to get Flume access token failed"
+            ) from exception
         if data := response_json.get("data"):
             try:
                 access_token = data[0].get("access_token")
                 if not access_token:
-                    raise FlumeTokenError(f"No access_token field in Flume token response: '{response_json}'")
+                    raise FlumeTokenError(
+                        f"No access_token field in Flume token response: '{response_json}'"
+                    )
             except IndexError:
-                raise FlumeTokenError(f"No data array in Flume token response: '{response_json}'")
+                raise FlumeTokenError(
+                    f"No data array in Flume token response: '{response_json}'"
+                )
         else:
-            raise FlumeTokenError(f"No data field in Flume token response: '{response_json}'")
+            raise FlumeTokenError(
+                f"No data field in Flume token response: '{response_json}'"
+            )
         return access_token
 
     def _get_user_id(self) -> int:
@@ -244,10 +251,14 @@ class FlumeClient:
         try:
             data = json.loads(base64.b64decode(bytes(jwt_payload, "utf-8") + b"=="))
         except Exception as exception:
-            raise FlumeTokenError(f"Failed to decode JWT token: {self.token}") from exception
+            raise FlumeTokenError(
+                f"Failed to decode JWT token: {self.token}"
+            ) from exception
         user_id = data.get("user_id")
         if not user_id:
-            raise FlumeTokenError(f"No user_id field in decodedFlume token response: '{data}'")
+            raise FlumeTokenError(
+                f"No user_id field in decodedFlume token response: '{data}'"
+            )
         return user_id
 
     def _get_my_flume_info(self) -> dict[str, Any]:
@@ -256,7 +267,9 @@ class FlumeClient:
         try:
             return safe_request(url, headers={"Authorization": f"Bearer {self.token}"})
         except Exception as exception:
-            raise FlumeTokenError("Request to get Flume device info failed") from exception
+            raise FlumeTokenError(
+                "Request to get Flume device info failed"
+            ) from exception
 
     @property
     def devices(self) -> list[FlumeDevice]:
@@ -273,7 +286,9 @@ class FlumeClient:
             )
             result.append(device)
         if not result:
-            raise FlumeDeviceError(f"No devices found in Flume info response: '{self._flume_info}'")
+            raise FlumeDeviceError(
+                f"No devices found in Flume info response: '{self._flume_info}'"
+            )
         return result
 
     @property
@@ -284,7 +299,9 @@ class FlumeClient:
             raise FlumeDeviceError(f"No Flume monitor devices found: '{self.devices}'")
         return monitors
 
-    def query_usage(self, device_id: str, queries: list[FlumeUsageQuery], max_query_n: int = 10) -> list[FlumeRequestData]:
+    def query_usage(
+        self, device_id: str, queries: list[FlumeUsageQuery], max_query_n: int = 10
+    ) -> list[FlumeRequestData]:
         """Execute one or more Flume usage queries and return a combined DataFrame."""
         url = (
             f"https://api.flumewater.com/users/{self.user_id}/devices/{device_id}/query"
@@ -318,7 +335,7 @@ class FlumeClient:
 class RachioClientError(Exception):
     """Raised when Rachio API requests fail"""
 
-    pass
+
 
 @dataclass
 class RachioZoneWateringSummary:
@@ -332,8 +349,10 @@ class RachioZoneWateringSummary:
     sqft: int
     enabled: bool
 
+
 class RachioClient:
-    """Minimal synchronous client for the Rachio API.
+    """
+    Minimal synchronous client for the Rachio API.
 
     The integration uses this class to discover recently watered zones and the
     time windows that should be matched against Flume flow data.
@@ -352,12 +371,18 @@ class RachioClient:
                 headers={"Authorization": f"Bearer {self._token}"},
             )
         except Exception as exception:
-            raise RachioClientError("Request to get Rachio person ID failed") from exception
+            raise RachioClientError(
+                "Request to get Rachio person ID failed"
+            ) from exception
         if not isinstance(r, dict):
-            raise RachioClientError(f"Unexpected Rachio person info response format: '{r}'")
+            raise RachioClientError(
+                f"Unexpected Rachio person info response format: '{r}'"
+            )
 
         if not (person_id := r.get("id")):
-            raise RachioClientError(f"No 'id' field in Rachio person info response: '{r}'")
+            raise RachioClientError(
+                f"No 'id' field in Rachio person info response: '{r}'"
+            )
         return person_id
 
     def _get_my_rachio_info(self) -> dict[str, Any]:
@@ -368,17 +393,21 @@ class RachioClient:
                 headers={"Authorization": f"Bearer {self._token}"},
             )
         except Exception as exception:
-            raise RachioClientError("Request to get Rachio person info failed") from exception
+            raise RachioClientError(
+                "Request to get Rachio person info failed"
+            ) from exception
 
     @staticmethod
-    def _get_last_water_time_for_zone(zone_info:dict[str, Any], local_timezone: str = "US/Pacific") -> RachioZoneWateringSummary:
+    def _get_last_water_time_for_zone(
+        zone_info: dict[str, Any], local_timezone: str = "US/Pacific"
+    ) -> RachioZoneWateringSummary:
         """Convert one Rachio zone payload into a normalized watering summary row."""
         watering_duration = zone_info["lastWateredDuration"]
         watering_duration_td = datetime.timedelta(seconds=watering_duration)
         last_water_start_timestamp = zone_info["lastWateredDate"]
         last_water_start_datetime = datetime.datetime.fromtimestamp(
             last_water_start_timestamp / 1000,
-            tz=datetime.timezone.utc,
+            tz=datetime.UTC,
         ).astimezone(pytz.timezone(local_timezone))
         last_water_stop_datetime = last_water_start_datetime + watering_duration_td
         sqft = zone_info["yardAreaSquareFeet"]
@@ -432,18 +461,31 @@ def _create_query_list(
     ]
     return query_list
 
+
 class WaterReportDataPoint(BaseModel):
     # Rachio last watering data
-    zone_name: str = Field(..., description="Name of the watered zone as reported by Rachio.")
-    zone_id: int = Field(..., description="Identifier of the watered zone as reported by Rachio.")
-    watering_start_time: datetime.datetime = Field(..., description="Start time of the most recent watering event for this zone as reported by Rachio.")
-    watering_stop_time: datetime.datetime = Field(..., description="Stop time of the most recent watering event for this zone as reported by Rachio.")
-    total_watering_minutes: float = Field(...,
-        description="Total minutes of watering during the window as measured by Rachio."
+    zone_name: str = Field(
+        ..., description="Name of the watered zone as reported by Rachio."
+    )
+    zone_id: int = Field(
+        ..., description="Identifier of the watered zone as reported by Rachio."
+    )
+    watering_start_time: datetime.datetime = Field(
+        ...,
+        description="Start time of the most recent watering event for this zone as reported by Rachio.",
+    )
+    watering_stop_time: datetime.datetime = Field(
+        ...,
+        description="Stop time of the most recent watering event for this zone as reported by Rachio.",
+    )
+    total_watering_minutes: float = Field(
+        ...,
+        description="Total minutes of watering during the window as measured by Rachio.",
     )
     # Flume usage
-    total_gallons_used: float | None = Field(...,
-        description="Total gallons used during the watering window as measured by Flume."
+    total_gallons_used: float | None = Field(
+        ...,
+        description="Total gallons used during the watering window as measured by Flume.",
     )
 
     @computed_field(return_type=float | None)
@@ -491,9 +533,8 @@ def poll_for_irrigation_usage(
 
     # combine all the FlumeRequestData objects into a single dict for easy lookup, then merge the total usage values into the Rachio watering summaries
     water_data_dict = reduce(
-        lambda a, b: a | b,
-        [x.to_usage_dict() for x in water_data]
-        )
+        lambda a, b: a | b, [x.to_usage_dict() for x in water_data]
+    )
 
     # construct the final report data
     report_data = []
