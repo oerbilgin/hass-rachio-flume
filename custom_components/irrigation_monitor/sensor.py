@@ -78,6 +78,19 @@ async def async_setup_entry(
         )
         for row in report
     )
+    async_add_entities(
+        [
+            IrrigationSystemWaterTotalSensor(
+                coordinator=entry.runtime_data.coordinator,
+            )
+        ]
+    )
+
+
+def _build_event_id(datapoint: WaterReportDataPoint) -> str:
+    """Build a stable identifier for one watering event."""
+    start_time = datapoint.watering_start_time.isoformat()
+    return f"{datapoint.zone_id}:{start_time}"
 
 
 class IrrigationZoneReportEntity(IrrigationMonitorEntity, SensorEntity):
@@ -117,8 +130,7 @@ class IrrigationZoneReportEntity(IrrigationMonitorEntity, SensorEntity):
         datapoint = self._report_datapoint
         if datapoint is None:
             return None
-        start_time = datapoint.watering_start_time.isoformat()
-        return f"{datapoint.zone_id}:{start_time}"
+        return _build_event_id(datapoint)
 
     @property
     def _report_datapoint(self) -> WaterReportDataPoint | None:
@@ -138,6 +150,8 @@ class IrrigationZoneReportEntity(IrrigationMonitorEntity, SensorEntity):
 
 class IrrigationZoneLastWateringSensor(IrrigationZoneReportEntity):
     """Represent the latest watering event marker for one zone."""
+
+    _attr_entity_registry_enabled_default = False
 
     def __init__(
         self,
@@ -267,3 +281,87 @@ class IrrigationZoneWaterTotalSensor(IrrigationZoneReportEntity, RestoreEntity):
 
         self._accumulated_gallons += float(gallons_used)
         self._last_processed_event_id = event_id
+
+
+class IrrigationSystemWaterTotalSensor(
+    IrrigationMonitorEntity, SensorEntity, RestoreEntity
+):
+    """Represent the cumulative gallons observed across all irrigation zones."""
+
+    _attr_entity_registry_enabled_default = False
+    _attr_device_class = SensorDeviceClass.WATER
+    _attr_native_unit_of_measurement = UnitOfVolume.GALLONS
+    _attr_state_class = SensorStateClass.TOTAL_INCREASING
+
+    def __init__(self, coordinator: IrrigationMonitorDataUpdateCoordinator) -> None:
+        """Create the cumulative whole-system water usage sensor."""
+        super().__init__(coordinator)
+        self._attr_unique_id = (
+            f"{coordinator.config_entry.entry_id}_water_total"
+        ).lower()
+        self._attr_name = "Irrigation total water used"
+        self._accumulated_gallons: float | None = None
+        self._last_processed_event_ids: dict[str, str] = {}
+
+    async def async_added_to_hass(self) -> None:
+        """Restore the accumulated total and processed per-zone event ids."""
+        await super().async_added_to_hass()
+
+        if (last_state := await self.async_get_last_state()) is not None:
+            try:
+                self._accumulated_gallons = float(last_state.state)
+            except (TypeError, ValueError):
+                self._accumulated_gallons = None
+
+            restored_event_ids = last_state.attributes.get("last_processed_event_ids")
+            if isinstance(restored_event_ids, dict):
+                self._last_processed_event_ids = {
+                    str(key): str(value)
+                    for key, value in restored_event_ids.items()
+                }
+
+        self._apply_latest_events()
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Expose the per-zone event ids used to maintain the running total."""
+        return {
+            "last_processed_event_ids": self._last_processed_event_ids,
+        }
+
+    @property
+    def native_value(self) -> float | None:
+        """Expose the cumulative gallons seen across all zones."""
+        return self._accumulated_gallons
+
+    def _handle_coordinator_update(self) -> None:
+        """Advance the cumulative total when new zone events appear."""
+        self._apply_latest_events()
+        super()._handle_coordinator_update()
+
+    def _apply_latest_events(self) -> None:
+        """Add each zone's latest event once, keyed by zone and event id."""
+        report = self.coordinator.data
+        if not report:
+            return
+
+        gallons_to_add = 0.0
+        for datapoint in report:
+            if datapoint.total_gallons_used is None:
+                continue
+
+            zone_key = str(datapoint.zone_id)
+            event_id = _build_event_id(datapoint)
+            if self._last_processed_event_ids.get(zone_key) == event_id:
+                continue
+
+            gallons_to_add += float(datapoint.total_gallons_used)
+            self._last_processed_event_ids[zone_key] = event_id
+
+        if gallons_to_add == 0:
+            return
+
+        if self._accumulated_gallons is None:
+            self._accumulated_gallons = 0.0
+
+        self._accumulated_gallons += gallons_to_add
