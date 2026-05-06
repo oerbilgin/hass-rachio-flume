@@ -213,6 +213,7 @@ class IrrigationZoneWaterUsedSensor(IrrigationZoneReportEntity):
 class IrrigationZoneWaterTotalSensor(IrrigationZoneReportEntity, RestoreEntity):
     """Represent the cumulative gallons observed for one irrigation zone."""
 
+    _attr_icon = "mdi:water-plus"
     _attr_device_class = SensorDeviceClass.WATER
     _attr_native_unit_of_measurement = UnitOfVolume.GALLONS
     _attr_state_class = SensorStateClass.TOTAL_INCREASING
