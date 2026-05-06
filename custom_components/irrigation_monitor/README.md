@@ -13,6 +13,57 @@ The component combines two data sources:
 
 The final result is a per-zone report that Home Assistant exposes as sensor entities.
 
+## Entity Guide
+
+The integration now creates several sensor types from the same per-zone report.
+They serve different jobs, and they are intentionally not interchangeable.
+
+### Per-zone entities
+
+For each irrigation zone, the integration creates:
+
+1. `last watering event`: timestamp of the latest watering start time for that zone
+2. `water used`: gallons measured for the latest watering event
+3. `total water used`: cumulative gallons observed for that zone over time
+
+The `last watering event` sensor is mainly an event marker. It is useful for:
+
+1. detecting that a new watering event happened even if two events use the same number of gallons
+2. automations that should react when a new irrigation cycle is observed
+3. debugging deduplication, because each event has a stable `event_id`
+
+The `water used` sensor is the best fit for graphing usage per watering event.
+
+The `total water used` sensor is the dashboard-oriented sensor for each zone. It
+is a cumulative water sensor that only increments when a newly observed event is
+seen for that zone.
+
+### Whole-system entity
+
+The integration also creates one aggregate sensor:
+
+1. `Irrigation total water used`: cumulative gallons observed across all zones
+
+This is the simplest entity to use if you want one irrigation number for the
+Home Assistant water dashboard.
+
+### Default visibility
+
+Some sensors are disabled by default to keep the entity list usable:
+
+1. the per-zone `last watering event` sensor
+2. the whole-system `Irrigation total water used` sensor
+
+They remain available in the entity registry and can be enabled if you want
+them.
+
+### Important limitation
+
+Rachio only exposes the latest watering record per zone. Because of that, this
+integration can only count the most recently reported event for each zone at
+poll time. If multiple watering events happen for the same zone between
+successful polls, older ones cannot be recovered.
+
 ## Architecture Diagram
 
 ```mermaid
@@ -112,19 +163,24 @@ That function does the real work:
 5. aggregates the results into gallons and minutes per zone
 6. merges the measured Flume data with the Rachio zone metadata
 
-The output is currently a pandas DataFrame.
+The output is a list of structured `WaterReportDataPoint` objects, one per
+zone.
 
 ### 6. The sensor platform turns report rows into entities
 
-After the coordinator has data, Home Assistant calls [sensor.py](./sensor.py). The `async_setup_entry` function loops over the report rows and creates one `IrrigationZoneSensor` per zone.
+After the coordinator has data, Home Assistant calls [sensor.py](./sensor.py).
+The `async_setup_entry` function loops over the report rows and creates several
+sensors per zone plus one whole-system total sensor.
 
-Each sensor:
+The current sensor set is:
 
-1. uses `total_gallons` as its main state
-2. exposes the rest of the row as extra attributes
-3. reads from the coordinator cache instead of storing its own fetched state
+1. a per-zone timestamp sensor for the latest watering event
+2. a per-zone gallons-used sensor for the latest watering event
+3. a per-zone cumulative gallons sensor for dashboard-style totals
+4. a whole-system cumulative gallons sensor across all zones
 
-This means a refresh updates all sensors together.
+All of them read from the shared coordinator cache instead of fetching their own
+data, so one coordinator refresh updates the whole entity set consistently.
 
 ### 7. Shared entity metadata lives separately
 
@@ -147,7 +203,8 @@ If you want one short mental model for the whole component, use this:
 3. `coordinator.py` refreshes one shared report.
 4. `api.py` wraps the polling call and normalizes errors.
 5. `util.py` talks to Flume and Rachio and builds the report.
-6. `sensor.py` exposes each report row as a Home Assistant entity.
+6. `sensor.py` exposes each report row as several Home Assistant entities with
+	different jobs: event marker, per-event usage, and cumulative totals.
 
 ## One Refresh Cycle
 
@@ -207,7 +264,7 @@ This is the real center of the data pipeline. It executes in this order:
 7. aggregate minute-level readings with `_summarize_watering`
 8. merge the Flume totals with the Rachio zone summary
 
-The result is returned as a pandas DataFrame called `irrigation_report`.
+The result is returned as a list of `WaterReportDataPoint` objects.
 
 ### Step 5: Flume authentication and device discovery happen first
 
@@ -243,21 +300,22 @@ Each query uses a zone name as its `request_id`, plus a start and end time windo
 
 ### Step 8: Flume usage readings are aggregated per zone
 
-`query_usage(...)` sends the Flume queries and returns minute-level readings in a DataFrame.
+`query_usage(...)` sends the Flume queries and returns the summarized Flume
+usage results matched back to the request ids for each zone.
 
-Then `poll_for_irrigation_usage` either:
+Then `poll_for_irrigation_usage` merges those measured totals with the Rachio
+watering metadata and builds one `WaterReportDataPoint` per zone.
 
-1. creates an empty summary DataFrame if Flume returned no readings, or
-2. groups by `zone_name` and runs `_summarize_watering` to calculate:
-   total gallons, total watering minutes, and gallons per minute
-
-That is the point where raw flow data becomes entity-friendly summary data.
+That is the point where raw vendor responses become entity-friendly summary
+data.
 
 ### Step 9: The merged report comes back through the stack
 
-The final merged `irrigation_report` returns from [util.py](./util.py) to [api.py](./api.py), then to [coordinator.py](./coordinator.py).
+The final merged irrigation report returns from [util.py](./util.py) to
+[api.py](./api.py), then to [coordinator.py](./coordinator.py).
 
-The coordinator stores that DataFrame as `coordinator.data`.
+The coordinator stores that list of `WaterReportDataPoint` objects as
+`coordinator.data`.
 
 From that point on, every sensor entity can read the same shared snapshot.
 
