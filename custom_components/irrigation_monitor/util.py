@@ -17,20 +17,19 @@ report itself, this is usually the module to inspect first.
 
 import base64
 import datetime
-from functools import total_ordering
+from functools import reduce
 import json
 import logging
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Literal, cast
 
-from attr import field
-import pandas as pd
 import pytz
 from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    computed_field,
     field_serializer,
     field_validator,
     model_validator,
@@ -40,31 +39,6 @@ import requests
 logger = logging.getLogger(__name__)
 
 FLUME_DATETIME_FORMAT = "%Y-%m-%d %H:%M:%S"
-
-FlumeApplianceType = Literal[
-    "ALL",
-    "OUTDOOR",
-    "IRRIGATION",
-    "SPRINKLER",
-    "HOSE",
-    "DRIP",
-    "SOAKER_HOSE",
-    "POOL",
-    "INDOOR",
-    "MECHANICAL",
-    "CLOTHES_WASHER",
-    "DISH_WASHER",
-    "TOILET",
-    "HUMIDIFIER",
-    "SOFTENER",
-    "DISCRETIONARY",
-    "FAUCET",
-    "TUB",
-    "SHOWER",
-    "LEAK",
-    "FLAPPER_LEAK",
-    "REVERSE_OSMOSIS",
-]
 
 def safe_request(url: str, timeout: int = 10, method=requests.get, **kwargs) -> dict:
     """Make an HTTP request and return parsed JSON or an empty dict on failure.
@@ -110,8 +84,6 @@ class FlumeDeviceError(Exception):
 
 class FlumeUsageQuery(BaseModel):
     """Validate and serialize one Flume usage query payload.
-    TODO: lock down how i actually use it (e.g. operation none vs sum)
-          and remove options i dont actually use- dont want to add unnecessary complexity
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -122,10 +94,6 @@ class FlumeUsageQuery(BaseModel):
             "Key used to identify this query in the Flume response when "
             "multiple queries are sent together."
         ),
-    )
-    bucket: Literal["MIN", "HR", "DAY", "MON", "YR"] = Field(
-        default="MIN",
-        description="Bucket grouping used for the usage data query.",
     )
     since_datetime: datetime.datetime | str = Field(
         description=(
@@ -142,41 +110,11 @@ class FlumeUsageQuery(BaseModel):
             "Defaults to now. Up to one year of data can be queried."
         ),
     )
-    group_multiplier: int = Field(
-        default=1,
-        ge=1,
-        le=100,
-        description=(
-            "Multiplier applied to the bucket grouping. For example, a "
-            "group_multiplier of 3 with bucket MON groups data in 3-month "
-            "intervals."
-        ),
-    )
-    operation: Literal["SUM", "AVG", "MIN", "MAX", "CNT"] | None = Field(
-        default=None,
-        description="Optional aggregate operation applied to the query results.",
-    )
-    sort_direction: Literal["ASC", "DESC"] = Field(
-        default="ASC",
-        description="Sort order for the returned query results.",
-    )
     units: Literal[
         "GALLONS", "LITERS", "CUBIC_FEET", "CUBIC_METERS"
     ] = Field(
         default="GALLONS",
         description="Unit of measurement used for returned water usage values.",
-    )
-    types: list[FlumeApplianceType] | None= Field(
-        default=None,
-        min_length=1,
-        description=(
-            "Appliance categories to include in the query. Supported values "
-            "follow Flume's documented hierarchy: ALL, OUTDOOR, "
-            "IRRIGATION, SPRINKLER, HOSE, DRIP, SOAKER_HOSE, POOL, "
-            "INDOOR, MECHANICAL, CLOTHES_WASHER, DISH_WASHER, TOILET, "
-            "HUMIDIFIER, SOFTENER, DISCRETIONARY, FAUCET, TUB, SHOWER, "
-            "LEAK, FLAPPER_LEAK, and REVERSE_OSMOSIS."
-        ),
     )
 
     @field_validator("since_datetime", "until_datetime", mode="before")
@@ -184,8 +122,6 @@ class FlumeUsageQuery(BaseModel):
     def _normalize_timestamp(cls, value: Any) -> datetime.datetime | None:
         if value in (None, ""):
             return None
-        if isinstance(value, pd.Timestamp):
-            value = value.to_pydatetime()
         if isinstance(value, datetime.datetime):
             return cls._normalize_datetime(value)
         if isinstance(value, str):
@@ -196,24 +132,6 @@ class FlumeUsageQuery(BaseModel):
                 message = "Timestamp must be a datetime or an ISO-like string"
                 raise ValueError(message) from exception
         message = "Timestamp must be a datetime, pandas Timestamp, or string"
-        raise TypeError(message)
-
-    @field_validator("types", mode="before")
-    @classmethod
-    def _normalize_types(cls, value: Any) -> list[str]:
-        if value in (None, ""):
-            return ["ALL"]
-        if isinstance(value, str):
-            return [value.upper()]
-        if isinstance(value, list):
-            normalized = []
-            for item in value:
-                if not isinstance(item, str):
-                    message = "Each Flume appliance type must be a string"
-                    raise TypeError(message)
-                normalized.append(item.upper())
-            return normalized
-        message = "types must be a string or list of strings"
         raise TypeError(message)
 
     @staticmethod
@@ -246,13 +164,28 @@ class FlumeUsageQuery(BaseModel):
         return self
 
     def as_payload(self) -> dict[str, Any]:
-        """Return the validated Flume payload with omitted null fields."""
-        return self.model_dump(exclude_none=True)
+        """Return the validated Flume payload options, and add the options we require for this integration."""
+        static_options = {
+            "bucket": "MIN",
+            "operation": "SUM",
+            "sort_direction": "ASC",
+            "group_multiplier": 1,
+        }
+
+
+        payload = self.model_dump(exclude_none=True)
+
+        payload = payload | static_options
+        return payload
 
 @dataclass
 class FlumeRequestData:
     request_id: str
     total_usage: float
+
+    def to_usage_dict(self) -> dict[str, float]:
+        """Convert the Flume request data into a dict format used for report generation."""
+        return {self.request_id: self.total_usage}
 
 class FlumeClient:
     """Minimal synchronous client for the Flume API.
@@ -494,43 +427,32 @@ def _create_query_list(
             request_id=zws.zone_name,
             since_datetime=zws.last_watering_start_time - time_offset,
             until_datetime=zws.last_watering_stop_time + time_offset,
-            operation='SUM'
         )
         for zws in todays_watering
     ]
     return query_list
 
-
-def _summarize_watering(grp):
-    """Reduce minute-level Flume readings into one per-zone summary row."""
-    total_gallons = grp["value"].sum()
-    total_time = grp["datetime"].max() - grp["datetime"].min()
-    total_seconds = total_time.total_seconds()
-    total_minutes = total_seconds / 60
-    gpm = total_gallons / total_minutes
-    data = {
-        "total_gallons": total_gallons,
-        "total_watering_minutes": total_minutes,
-        "gallons_per_minute": gpm,
-    }
-    return pd.Series(data)
-
-
-
 class WaterReportDataPoint(BaseModel):
+    # Rachio last watering data
     zone_name: str = Field(..., description="Name of the watered zone as reported by Rachio.")
     zone_id: int = Field(..., description="Identifier of the watered zone as reported by Rachio.")
-    last_watering_start_time: datetime.datetime = Field(..., description="Start time of the most recent watering event for this zone as reported by Rachio.")
-    last_watering_stop_time: datetime.datetime = Field(..., description="Stop time of the most recent watering event for this zone as reported by Rachio.")
-    total_gallons: float = Field(...,
+    watering_start_time: datetime.datetime = Field(..., description="Start time of the most recent watering event for this zone as reported by Rachio.")
+    watering_stop_time: datetime.datetime = Field(..., description="Stop time of the most recent watering event for this zone as reported by Rachio.")
+    total_watering_minutes: float = Field(...,
+        description="Total minutes of watering during the window as measured by Rachio."
+    )
+    # Flume usage
+    total_gallons_used: float | None = Field(...,
         description="Total gallons used during the watering window as measured by Flume."
     )
-    total_watering_minutes: float = Field(...,
-        description="Total minutes of watering during the window as measured by Flume."
-    )
-    gallons_per_minute: float = Field(...,
-        description="Average gallons per minute during the watering window as measured by Flume."
-    )
+
+    @computed_field(return_type=float | None)
+    @property
+    def gallons_per_minute(self) -> float | None:
+        """Calculate the average gallons per minute during the watering window."""
+        if self.total_watering_minutes > 0 and self.total_gallons_used is not None:
+            return self.total_gallons_used / self.total_watering_minutes
+        return None
 
 
 def poll_for_irrigation_usage(
@@ -566,35 +488,27 @@ def poll_for_irrigation_usage(
     water_data = flume_client.query_usage(
         device_id=monitor.device_id, queries=query_list
     )
-    # TODO: can we get away from pandas here? groupby ops taken care of with Flume, merge can be done with dict keys
-    # if not water_data:
-    #     # No water data returned; create an empty summary with expected columns
-    #     water_data_summary = pd.DataFrame(
-    #         columns=[
-    #             "zone_name",
-    #             "total_gallons",
-    #             "total_watering_minutes",
-    #             "gallons_per_minute",
-    #         ]
-    #     )
 
-    # else:
-    #     water_data_df = pd.DataFrame(water_data)
-    #     water_data_df = water_data_df.rename({"request_id": "zone_name"}, axis=1)
-    #     water_data_df["datetime"] = pd.to_datetime(water_data_df["datetime"])
-    #     water_data_summary = (
-    #         water_data_df
-    #         .groupby("zone_name")
-    #         .apply(_summarize_watering, include_groups=False)  # type: ignore
-    #         .reset_index()
-    #     )
-    # irrigation_report = water_data_summary.merge(pd.DataFrame(todays_watering), how="right")
-    # if irrigation_report.empty:
-    #     return []
-    # return [
-    #     WaterReportDataPoint(**{str(key): value for key, value in x.items()})
-    #     for x in irrigation_report.to_dict(orient="records")
-    # ]
+    # combine all the FlumeRequestData objects into a single dict for easy lookup, then merge the total usage values into the Rachio watering summaries
+    water_data_dict = reduce(
+        lambda a, b: a | b,
+        [x.to_usage_dict() for x in water_data]
+        )
+
+    # construct the final report data
+    report_data = []
+    for watering in todays_watering:
+        datapoint = WaterReportDataPoint(
+            zone_name=watering.zone_name,
+            zone_id=watering.zone_id,
+            watering_start_time=watering.last_watering_start_time,
+            watering_stop_time=watering.last_watering_stop_time,
+            total_gallons_used=water_data_dict.get(watering.zone_name, None),
+            total_watering_minutes=watering.last_watering_duration_minutes,
+        )
+        report_data.append(datapoint)
+
+    return report_data
 
 
 if __name__ == "__main__":
