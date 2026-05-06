@@ -29,3 +29,5 @@ logger:
   default: info
   logs:
     custom_components.rachio_flume: debug
+
+energy:
