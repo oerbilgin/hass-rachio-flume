@@ -17,11 +17,13 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from homeassistant.components.sensor import SensorEntity
+from homeassistant.components.sensor import SensorDeviceClass, SensorEntity
 
 from .entity import IrrigationMonitorEntity
 
 if TYPE_CHECKING:
+    import datetime
+
     from homeassistant.core import HomeAssistant
     from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
@@ -76,24 +78,28 @@ class IrrigationZoneSensor(IrrigationMonitorEntity, SensorEntity):
         self._zone_id = zone_id
         zone_key = str(zone_id if zone_id is not None else zone_name).replace(" ", "_")
         self._attr_unique_id = f"{coordinator.config_entry.entry_id}_{zone_key}".lower()
-        self._attr_name = f"Irrigation {zone_name}"
+        self._attr_name = f"Irrigation {zone_name} last watering"
+        self._attr_device_class = SensorDeviceClass.TIMESTAMP
 
     @property
-    def native_value(self) -> float | None:
-        """Expose the zone's total measured gallons as the sensor state."""
+    def native_value(self) -> datetime.datetime | None:
+        """
+        Expose the zone's watering start time as the sensor state.
+
+        This makes HomeAssistant record each new watering event in the history.
+        """
         datapoint = self._report_datapoint
         if datapoint is None:
             return None
-        total_gallons = datapoint.total_gallons_used
-        return None if total_gallons is None else float(total_gallons)
+        return datapoint.watering_start_time
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
-        """Expose the full report row as extra attributes for inspection."""
+        """Expose the full watering event metadata as serialized attributes."""
         datapoint = self._report_datapoint
         if datapoint is None:
             return {}
-        return datapoint.model_dump()
+        return datapoint.model_dump(mode="json")
 
     @property
     def _report_datapoint(self) -> WaterReportDataPoint | None:
