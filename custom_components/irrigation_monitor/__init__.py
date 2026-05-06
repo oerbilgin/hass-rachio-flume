@@ -33,6 +33,7 @@ if TYPE_CHECKING:
     from .data import IrrigationMonitorConfigEntry
 
 PLATFORMS: list[Platform] = [Platform.SENSOR]
+DEFAULT_UPDATE_INTERVAL = timedelta(hours=1)
 
 
 async def async_setup_entry(
@@ -50,7 +51,7 @@ async def async_setup_entry(
         hass=hass,
         logger=LOGGER,
         name=DOMAIN,
-        update_interval=timedelta(minutes=10),
+        update_interval=DEFAULT_UPDATE_INTERVAL,
     )
     entry.runtime_data = IrrigationMonitorData(
         client=IrrigationMonitorApiClient(entry.data),
