@@ -19,21 +19,19 @@ from typing import TYPE_CHECKING, Any
 
 from homeassistant.components.sensor import SensorEntity
 
-from custom_components.irrigation_monitor.coordinator import (
-    IrrigationMonitorDataUpdateCoordinator,
-)
-
 from .entity import IrrigationMonitorEntity
 
 if TYPE_CHECKING:
     from homeassistant.core import HomeAssistant
     from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
+    from .coordinator import IrrigationMonitorDataUpdateCoordinator
     from .data import IrrigationMonitorConfigEntry
+    from .util import WaterReportDataPoint
 
 
 async def async_setup_entry(
-    hass: HomeAssistant,
+    _hass: HomeAssistant,
     entry: IrrigationMonitorConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
@@ -45,16 +43,16 @@ async def async_setup_entry(
     snapshot immediately.
     """
     report = entry.runtime_data.coordinator.data
-    if report is None or report.empty:
+    if not report:
         return
 
     async_add_entities(
         IrrigationZoneSensor(
             coordinator=entry.runtime_data.coordinator,
-            zone_name=str(row.get("zone_name") or "unknown"),
-            zone_id=row.get("zone_id"),
+            zone_name=row.zone_name or "unknown",
+            zone_id=row.zone_id,
         )
-        for _, row in report.iterrows()
+        for row in report
     )
 
 
@@ -70,7 +68,7 @@ class IrrigationZoneSensor(IrrigationMonitorEntity, SensorEntity):
         self,
         coordinator: IrrigationMonitorDataUpdateCoordinator,
         zone_name: str,
-        zone_id: str,
+        zone_id: int | None,
     ) -> None:
         """Store the zone identity used to find this sensor's report row."""
         super().__init__(coordinator)
@@ -83,32 +81,31 @@ class IrrigationZoneSensor(IrrigationMonitorEntity, SensorEntity):
     @property
     def native_value(self) -> float | None:
         """Expose the zone's total measured gallons as the sensor state."""
-        row = self._report_row
-        if row is None:
+        datapoint = self._report_datapoint
+        if datapoint is None:
             return None
-        total_gallons = row.get("total_gallons")
+        total_gallons = datapoint.total_gallons_used
         return None if total_gallons is None else float(total_gallons)
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         """Expose the full report row as extra attributes for inspection."""
-        row = self._report_row
-        if row is None:
+        datapoint = self._report_datapoint
+        if datapoint is None:
             return {}
-        return row
+        return datapoint.model_dump()
 
     @property
-    def _report_row(self) -> dict[str, Any] | None:
+    def _report_datapoint(self) -> WaterReportDataPoint | None:
         """Find this zone's current row inside the shared coordinator data."""
         report = self.coordinator.data
-        if report is None or report.empty:
+        if not report:
             return None
 
-        if self._zone_id is not None and "zone_id" in report.columns:
-            zone_rows = report.loc[report["zone_id"] == self._zone_id]
-        else:
-            zone_rows = report.loc[report["zone_name"] == self._zone_name]
+        for datapoint in report:
+            if self._zone_id is not None and datapoint.zone_id == self._zone_id:
+                return datapoint
+            if datapoint.zone_name == self._zone_name:
+                return datapoint
 
-        if zone_rows.empty:
-            return None
-        return zone_rows.iloc[0].to_dict()
+        return None

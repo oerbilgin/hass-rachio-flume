@@ -14,9 +14,7 @@ combined Flume and Rachio data.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
-from typing import Any
-import pandas as pd
+from typing import TYPE_CHECKING, Any
 
 from .const import (
     CONF_FLUME_CLIENT_ID,
@@ -26,7 +24,17 @@ from .const import (
     CONF_FLUME_USER,
     CONF_RACHIO_TOKEN,
 )
-from .util import FlumeTokenError, RachioClient, poll_for_irrigation_usage
+from .util import (
+    FlumeTokenError,
+    RachioClient,
+    WaterReportDataPoint,
+    poll_for_irrigation_usage,
+)
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
+
+    from homeassistant.core import HomeAssistant
 
 
 class IrrigationMonitorApiClientError(Exception):
@@ -58,28 +66,23 @@ class IrrigationMonitorApiClient:
         """Return the Flume device index as an integer."""
         return int(self._config.get(CONF_FLUME_DEVICE_INDEX, 0))
 
-    async def async_validate_credentials(self, hass) -> None:
+    async def async_validate_credentials(self, hass: HomeAssistant) -> None:
         """
         Validate credentials during config flow setup.
 
         The work is moved to an executor because the underlying HTTP logic is
         synchronous and should not block Home Assistant's event loop.
         """
-        try:
-            await hass.async_add_executor_job(self._validate_credentials)
-        except IrrigationMonitorApiClientAuthenticationError:
-            raise
-        except IrrigationMonitorApiClientCommunicationError:
-            raise
-        except IrrigationMonitorApiClientError:
-            raise
+        await hass.async_add_executor_job(self._validate_credentials)
 
-    async def async_get_data(self, hass) -> pd.DataFrame:
+    async def async_get_data(
+        self, hass: HomeAssistant | None
+    ) -> list[WaterReportDataPoint]:
         """
         Return the latest combined irrigation report.
 
-        The returned object is currently a pandas DataFrame where each row
-        represents one Rachio zone enriched with Flume usage totals.
+        The returned object is one item per Rachio zone enriched with Flume
+        usage totals.
         """
         try:
             if hass is None:
@@ -134,7 +137,7 @@ class IrrigationMonitorApiClient:
                 ) from rachio_exception
             raise IrrigationMonitorApiClientError(exception) from exception
 
-    async def _async_call_poll_in_thread(self) -> pd.DataFrame:
+    async def _async_call_poll_in_thread(self) -> list[WaterReportDataPoint]:
         """Run the same polling logic outside a Home Assistant executor context."""
         return poll_for_irrigation_usage(
             self._config[CONF_FLUME_USER],

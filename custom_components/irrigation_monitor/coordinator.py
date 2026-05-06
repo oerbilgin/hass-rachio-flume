@@ -17,7 +17,6 @@ coordinator instead.
 
 from __future__ import annotations
 
-import pandas as pd
 from typing import TYPE_CHECKING
 
 from homeassistant.exceptions import ConfigEntryAuthFailed
@@ -27,12 +26,15 @@ from .api import (
     IrrigationMonitorApiClientAuthenticationError,
     IrrigationMonitorApiClientError,
 )
+from .util import WaterReportDataPoint
 
 if TYPE_CHECKING:
     from .data import IrrigationMonitorConfigEntry
 
 
-class IrrigationMonitorDataUpdateCoordinator(DataUpdateCoordinator[pd.DataFrame]):
+class IrrigationMonitorDataUpdateCoordinator(
+    DataUpdateCoordinator[list[WaterReportDataPoint]]
+):
     """
     Fetch one shared irrigation report and fan it out to all entities.
 
@@ -42,7 +44,7 @@ class IrrigationMonitorDataUpdateCoordinator(DataUpdateCoordinator[pd.DataFrame]
 
     config_entry: IrrigationMonitorConfigEntry
 
-    async def _async_update_data(self) -> pd.DataFrame:
+    async def _async_update_data(self) -> list[WaterReportDataPoint]:
         """
         Ask the API client for new data and translate errors for HA.
 
