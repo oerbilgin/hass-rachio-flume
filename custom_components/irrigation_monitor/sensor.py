@@ -17,8 +17,13 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from homeassistant.components.sensor import SensorDeviceClass, SensorEntity
+from homeassistant.components.sensor import (
+    SensorDeviceClass,
+    SensorEntity,
+    SensorStateClass,
+)
 from homeassistant.const import UnitOfVolume
+from homeassistant.helpers.restore_state import RestoreEntity
 
 from .entity import IrrigationMonitorEntity
 
@@ -59,6 +64,14 @@ async def async_setup_entry(
     )
     async_add_entities(
         IrrigationZoneWaterUsedSensor(
+            coordinator=entry.runtime_data.coordinator,
+            zone_name=row.zone_name or "unknown",
+            zone_id=row.zone_id,
+        )
+        for row in report
+    )
+    async_add_entities(
+        IrrigationZoneWaterTotalSensor(
             coordinator=entry.runtime_data.coordinator,
             zone_name=row.zone_name or "unknown",
             zone_id=row.zone_id,
@@ -181,3 +194,76 @@ class IrrigationZoneWaterUsedSensor(IrrigationZoneReportEntity):
         if datapoint.total_gallons_used is None:
             return None
         return float(datapoint.total_gallons_used)
+
+
+class IrrigationZoneWaterTotalSensor(IrrigationZoneReportEntity, RestoreEntity):
+    """Represent the cumulative gallons observed for one irrigation zone."""
+
+    _attr_device_class = SensorDeviceClass.WATER
+    _attr_native_unit_of_measurement = UnitOfVolume.GALLONS
+    _attr_state_class = SensorStateClass.TOTAL_INCREASING
+
+    def __init__(
+        self,
+        coordinator: IrrigationMonitorDataUpdateCoordinator,
+        zone_name: str,
+        zone_id: int | None,
+    ) -> None:
+        """Create the cumulative water usage sensor for one irrigation zone."""
+        super().__init__(coordinator, zone_name, zone_id)
+        self._attr_unique_id = (
+            f"{coordinator.config_entry.entry_id}_{self._zone_key}_water_total"
+        ).lower()
+        self._attr_name = f"Irrigation {zone_name} total water used"
+        self._accumulated_gallons: float | None = None
+        self._last_processed_event_id: str | None = None
+
+    async def async_added_to_hass(self) -> None:
+        """Restore the accumulated total and last processed event after restart."""
+        await super().async_added_to_hass()
+
+        if (last_state := await self.async_get_last_state()) is not None:
+            try:
+                self._accumulated_gallons = float(last_state.state)
+            except (TypeError, ValueError):
+                self._accumulated_gallons = None
+            self._last_processed_event_id = last_state.attributes.get("event_id")
+
+        self._apply_latest_event()
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Expose the latest event metadata plus total-tracking details."""
+        attributes = super().extra_state_attributes
+        attributes["last_processed_event_id"] = self._last_processed_event_id
+        return attributes
+
+    @property
+    def native_value(self) -> float | None:
+        """Expose the cumulative gallons seen for this zone."""
+        return self._accumulated_gallons
+
+    def _handle_coordinator_update(self) -> None:
+        """Advance the cumulative total when a new watering event appears."""
+        self._apply_latest_event()
+        super()._handle_coordinator_update()
+
+    def _apply_latest_event(self) -> None:
+        """Add the latest event once, keyed by the stable event identifier."""
+        datapoint = self._report_datapoint
+        event_id = self._event_id
+        if datapoint is None or event_id is None:
+            return
+
+        gallons_used = datapoint.total_gallons_used
+        if gallons_used is None:
+            return
+
+        if self._last_processed_event_id == event_id:
+            return
+
+        if self._accumulated_gallons is None:
+            self._accumulated_gallons = 0.0
+
+        self._accumulated_gallons += float(gallons_used)
+        self._last_processed_event_id = event_id
