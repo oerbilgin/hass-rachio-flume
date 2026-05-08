@@ -1,0 +1,24 @@
+{
+    "config": {
+        "step": {
+            "user": {
+                "data": {
+                    "flume_user": "Flume username",
+                    "flume_pass": "Flume password",
+                    "flume_client_id": "Flume client ID",
+                    "flume_client_secret": "Flume client secret",
+                    "rachio_token": "Rachio token",
+                    "flume_device_index": "Flume device index"
+                }
+            }
+        },
+        "error": {
+            "auth": "Credentials are invalid.",
+            "connection": "Unable to connect to Flume or Rachio.",
+            "unknown": "Unknown error occurred."
+        },
+        "abort": {
+            "already_configured": "This entry is already configured."
+        }
+    }
+}

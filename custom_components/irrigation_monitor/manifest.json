@@ -1,0 +1,20 @@
+{
+  "domain": "irrigation_monitor",
+  "name": "Irrigation Monitor",
+  "codeowners": [],
+  "config_flow": true,
+  "dependencies": [],
+  "documentation": "https://github.com/oerbilgin/hass-rachio-flume/blob/main/custom_components/irrigation_monitor/README.md",
+  "iot_class": "cloud_polling",
+  "issue_tracker": "https://github.com/oerbilgin/hass-rachio-flume/issues",
+  "loggers": [
+    "custom_components.irrigation_monitor"
+  ],
+  "requirements": [
+    "pytz>=2023.3,<2024.0",
+    "requests>=2.32.5,<3.0.0",
+    "pydantic>=2.0.0,<3.0.0"
+  ],
+  "version": "0.1.0"
+
+}
