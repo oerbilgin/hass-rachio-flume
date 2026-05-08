@@ -13,6 +13,15 @@ The component combines two data sources:
 
 The final result is a per-zone report that Home Assistant exposes as sensor entities.
 
+## Getting Started
+You will need to enter several credentials upon first-time setup:
+- Flume Username: Username for your Flume account
+- Flume Password: Password for your Flume account
+- Flume Client ID: You need to sign in to your Flume account, go to Settings > API Access, then click `Generate API Client` to see your Client ID. [See Overview section in these docs.](https://flumetech.readme.io/docs/authentication)
+- Flume Client Secret: When you generate your API client, you will be able to see your client secret as well. [See Overview section in these docs.](https://flumetech.readme.io/docs/authentication)
+- Rachio API Token: Log in to Rachio, go to Profile > API Key to get your API key. [Docs](https://rachio.readme.io/reference/authentication)
+- Flume Device Index (optional): Only relevant if you have multiple Flume devices; use this to specify which device to use.
+
 ## Entity Guide
 
 The integration now creates several sensor types from the same per-zone report.
