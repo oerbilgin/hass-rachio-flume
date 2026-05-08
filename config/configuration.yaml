@@ -1,5 +1,24 @@
-# https://www.home-assistant.io/integrations/default_config/
-default_config:
+# `default_config` now pulls in `go2rtc` on newer Home Assistant versions.
+# This pip-based development template does not provide that runtime by default,
+# so we enable a smaller explicit set of integrations for local development.
+
+# https://www.home-assistant.io/integrations/frontend/
+frontend:
+
+# https://www.home-assistant.io/integrations/config/
+config:
+
+# https://www.home-assistant.io/integrations/lovelace/
+lovelace:
+
+# https://www.home-assistant.io/integrations/automation/
+automation:
+
+# https://www.home-assistant.io/integrations/script/
+script:
+
+# https://www.home-assistant.io/integrations/scene/
+scene:
 
 # https://www.home-assistant.io/integrations/homeassistant/
 homeassistant:
@@ -9,4 +28,6 @@ homeassistant:
 logger:
   default: info
   logs:
-    custom_components.integration_blueprint: debug
+    custom_components.rachio_flume: debug
+
+energy:
