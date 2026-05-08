@@ -26,6 +26,7 @@ from .const import (
 )
 from .util import (
     FlumeTokenError,
+    IrrigationMonitorCredentials,
     RachioClient,
     WaterReportDataPoint,
     poll_for_irrigation_usage,
@@ -66,6 +67,16 @@ class IrrigationMonitorApiClient:
         """Return the Flume device index as an integer."""
         return int(self._config.get(CONF_FLUME_DEVICE_INDEX, 0))
 
+    def _get_credentials(self) -> IrrigationMonitorCredentials:
+        """Build the polling credential bundle from the stored config."""
+        return IrrigationMonitorCredentials(
+            flume_user=self._config[CONF_FLUME_USER],
+            flume_pass=self._config[CONF_FLUME_PASS],
+            flume_client_id=self._config[CONF_FLUME_CLIENT_ID],
+            flume_client_secret=self._config[CONF_FLUME_CLIENT_SECRET],
+            rachio_token=self._config[CONF_RACHIO_TOKEN],
+        )
+
     async def async_validate_credentials(self, hass: HomeAssistant) -> None:
         """
         Validate credentials during config flow setup.
@@ -89,11 +100,7 @@ class IrrigationMonitorApiClient:
                 return await self._async_call_poll_in_thread()
             return await hass.async_add_executor_job(
                 poll_for_irrigation_usage,
-                self._config[CONF_FLUME_USER],
-                self._config[CONF_FLUME_PASS],
-                self._config[CONF_FLUME_CLIENT_ID],
-                self._config[CONF_FLUME_CLIENT_SECRET],
-                self._config[CONF_RACHIO_TOKEN],
+                self._get_credentials(),
                 self._get_flume_device_index(),
             )
         except FlumeTokenError as exception:
@@ -115,11 +122,7 @@ class IrrigationMonitorApiClient:
         """
         try:
             poll_for_irrigation_usage(
-                self._config[CONF_FLUME_USER],
-                self._config[CONF_FLUME_PASS],
-                self._config[CONF_FLUME_CLIENT_ID],
-                self._config[CONF_FLUME_CLIENT_SECRET],
-                self._config[CONF_RACHIO_TOKEN],
+                self._get_credentials(),
                 self._get_flume_device_index(),
             )
         except FlumeTokenError as exception:
@@ -140,10 +143,6 @@ class IrrigationMonitorApiClient:
     async def _async_call_poll_in_thread(self) -> list[WaterReportDataPoint]:
         """Run the same polling logic outside a Home Assistant executor context."""
         return poll_for_irrigation_usage(
-            self._config[CONF_FLUME_USER],
-            self._config[CONF_FLUME_PASS],
-            self._config[CONF_FLUME_CLIENT_ID],
-            self._config[CONF_FLUME_CLIENT_SECRET],
-            self._config[CONF_RACHIO_TOKEN],
+            self._get_credentials(),
             self._get_flume_device_index(),
         )

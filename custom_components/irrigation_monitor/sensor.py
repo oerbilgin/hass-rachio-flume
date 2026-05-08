@@ -240,7 +240,7 @@ class IrrigationZoneWaterTotalSensor(IrrigationZoneReportEntity, RestoreEntity):
         if (last_state := await self.async_get_last_state()) is not None:
             try:
                 self._accumulated_gallons = float(last_state.state)
-            except (TypeError, ValueError):
+            except TypeError, ValueError:
                 self._accumulated_gallons = None
             self._last_processed_event_id = last_state.attributes.get("event_id")
 
@@ -311,14 +311,13 @@ class IrrigationSystemWaterTotalSensor(
         if (last_state := await self.async_get_last_state()) is not None:
             try:
                 self._accumulated_gallons = float(last_state.state)
-            except (TypeError, ValueError):
+            except TypeError, ValueError:
                 self._accumulated_gallons = None
 
             restored_event_ids = last_state.attributes.get("last_processed_event_ids")
             if isinstance(restored_event_ids, dict):
                 self._last_processed_event_ids = {
-                    str(key): str(value)
-                    for key, value in restored_event_ids.items()
+                    str(key): str(value) for key, value in restored_event_ids.items()
                 }
 
         self._apply_latest_events()

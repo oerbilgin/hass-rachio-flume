@@ -15,9 +15,9 @@ LOGGER: Logger = getLogger(__package__)
 
 DOMAIN = "irrigation_monitor"
 CONF_FLUME_USER = "flume_user"
-CONF_FLUME_PASS = "flume_pass"
+CONF_FLUME_PASS = "flume_pass"  # noqa: S105
 CONF_FLUME_CLIENT_ID = "flume_client_id"
-CONF_FLUME_CLIENT_SECRET = "flume_client_secret"
-CONF_RACHIO_TOKEN = "rachio_token"
+CONF_FLUME_CLIENT_SECRET = "flume_client_secret"  # noqa: S105
+CONF_RACHIO_TOKEN = "rachio_token"  # noqa: S105
 CONF_FLUME_DEVICE_INDEX = "flume_device_index"
 ATTRIBUTION = "Data provided by Flume and Rachio"
