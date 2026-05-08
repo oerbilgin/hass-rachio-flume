@@ -36,6 +36,18 @@ File | Purpose | Documentation
 1. Rename all instances of the `Integration Blueprint` to `<Your Integration Name>` (e.g. `Awesome Integration`).
 1. Run the `scripts/develop` to start HA and test out your new integration.
 
+## Development note
+
+This template intentionally uses a small explicit Home Assistant configuration in
+`config/configuration.yaml` instead of `default_config:`.
+
+This is a compatibility workaround for Home Assistant 2026.x and newer.
+
+Recent Home Assistant versions include `go2rtc` in `default_config`, which works
+well on Home Assistant OS and Home Assistant Container, but can fail in this
+lightweight pip-based development environment because the required runtime is not
+provided by the template.
+
 ## Next steps
 
 These are some next steps you may want to look into:
