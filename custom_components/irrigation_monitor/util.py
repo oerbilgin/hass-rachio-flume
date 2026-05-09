@@ -23,8 +23,8 @@ from dataclasses import dataclass
 from enum import Enum
 from functools import reduce
 from typing import TYPE_CHECKING, Any, Literal, cast
+from zoneinfo import ZoneInfo
 
-import pytz
 import requests
 from pydantic import (
     BaseModel,
@@ -313,12 +313,15 @@ class FlumeClient:
             device = FlumeDevice(
                 device_id=device_data.get("id"),
                 device_name=(
-                    f"{location_data.get('name', '')} "
-                    f"({location_data.get('address', '')})"
+                    f"{location_data.get('name', 'unknown_name')} "
+                    f"({location_data.get('address', 'unknown_address')})"
                 ),
                 device_timezone=location_data.get("tz"),
                 device_type=DeviceType(device_data.get("type", 0)),
             )
+            if not device.device_timezone:
+                msg = "Device missing timezone info"
+                raise FlumeDeviceError(msg, device_data)
             result.append(device)
         if not result:
             msg = "No devices found in Flume info response"
@@ -446,7 +449,7 @@ class RachioClient:
         last_water_start_datetime = datetime.datetime.fromtimestamp(
             last_water_start_timestamp / 1000,
             tz=datetime.UTC,
-        ).astimezone(pytz.timezone(local_timezone))
+        ).astimezone(ZoneInfo(local_timezone))
         last_water_stop_datetime = last_water_start_datetime + watering_duration_td
         sqft = zone_info["yardAreaSquareFeet"]
         inph = zone_info["customNozzle"]["inchesPerHour"]
