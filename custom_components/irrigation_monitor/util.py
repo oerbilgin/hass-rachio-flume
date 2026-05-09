@@ -313,12 +313,15 @@ class FlumeClient:
             device = FlumeDevice(
                 device_id=device_data.get("id"),
                 device_name=(
-                    f"{location_data.get('name', '')} "
-                    f"({location_data.get('address', '')})"
+                    f"{location_data.get('name', 'unknown_name')} "
+                    f"({location_data.get('address', 'unknown_address')})"
                 ),
                 device_timezone=location_data.get("tz"),
                 device_type=DeviceType(device_data.get("type", 0)),
             )
+            if not device.device_timezone:
+                msg = "Device missing timezone info"
+                raise FlumeDeviceError(msg, device_data)
             result.append(device)
         if not result:
             msg = "No devices found in Flume info response"
