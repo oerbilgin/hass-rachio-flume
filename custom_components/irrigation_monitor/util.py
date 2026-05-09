@@ -23,8 +23,8 @@ from dataclasses import dataclass
 from enum import Enum
 from functools import reduce
 from typing import TYPE_CHECKING, Any, Literal, cast
+from zoneinfo import ZoneInfo
 
-import pytz
 import requests
 from pydantic import (
     BaseModel,
@@ -446,7 +446,7 @@ class RachioClient:
         last_water_start_datetime = datetime.datetime.fromtimestamp(
             last_water_start_timestamp / 1000,
             tz=datetime.UTC,
-        ).astimezone(pytz.timezone(local_timezone))
+        ).astimezone(ZoneInfo(local_timezone))
         last_water_stop_datetime = last_water_start_datetime + watering_duration_td
         sqft = zone_info["yardAreaSquareFeet"]
         inph = zone_info["customNozzle"]["inchesPerHour"]
