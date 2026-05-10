@@ -78,11 +78,13 @@ async def async_setup_entry(
         )
         for row in report
     )
-    async_add_entities([
-        IrrigationSystemWaterTotalSensor(
-            coordinator=entry.runtime_data.coordinator,
-        )
-    ])
+    async_add_entities(
+        [
+            IrrigationSystemWaterTotalSensor(
+                coordinator=entry.runtime_data.coordinator,
+            )
+        ]
+    )
 
 
 def _build_event_id(datapoint: WaterReportDataPoint) -> str:
