@@ -78,13 +78,11 @@ async def async_setup_entry(
         )
         for row in report
     )
-    async_add_entities(
-        [
-            IrrigationSystemWaterTotalSensor(
-                coordinator=entry.runtime_data.coordinator,
-            )
-        ]
-    )
+    async_add_entities([
+        IrrigationSystemWaterTotalSensor(
+            coordinator=entry.runtime_data.coordinator,
+        )
+    ])
 
 
 def _build_event_id(datapoint: WaterReportDataPoint) -> str:
@@ -289,7 +287,6 @@ class IrrigationSystemWaterTotalSensor(
 ):
     """Represent the cumulative gallons observed across all irrigation zones."""
 
-    _attr_entity_registry_enabled_default = False
     _attr_device_class = SensorDeviceClass.WATER
     _attr_native_unit_of_measurement = UnitOfVolume.GALLONS
     _attr_state_class = SensorStateClass.TOTAL_INCREASING
