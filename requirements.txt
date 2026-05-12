@@ -3,4 +3,4 @@ homeassistant==2026.3.2
 pip>=21.3.1
 ruff==0.15.7
 pydantic>=2.0.0,<3.0.0
-requests>=2.32.5,<3.0.0
+requests>=2.34.0,<3.0.0
