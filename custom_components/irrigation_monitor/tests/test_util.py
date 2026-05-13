@@ -18,9 +18,11 @@ from ..util import (
     FlumeUsageQuery,
     IrrigationMonitorCredentials,
     IrrigationMonitorRequestAuthError,
+    IrrigationMonitorRequestDNSError,
     RachioZoneWateringSummary,
     WaterReportDataPoint,
     _create_query_list,
+    _create_retry_session,
     poll_for_irrigation_usage,
 )
 
@@ -124,11 +126,56 @@ def test_safe_request_classifies_unauthorized_http_errors() -> None:
         def raise_for_status(self) -> None:
             raise requests.HTTPError("unauthorized", response=self)
 
-    def fake_method(*args: object, **kwargs: object) -> FakeResponse:
-        return FakeResponse()
+    class FakeSession:
+        def request(
+            self, *, method: str, url: str, timeout: int, **kwargs: object
+        ) -> FakeResponse:
+            assert method == "GET"
+            assert url == "https://example.com/oauth/token"
+            assert timeout == 10
+            return FakeResponse()
 
     with pytest.raises(IrrigationMonitorRequestAuthError, match="authorization"):
-        util.safe_request("https://example.com/oauth/token", method=fake_method)
+        util.safe_request(
+            "https://example.com/oauth/token",
+            session=FakeSession(),
+        )
+
+
+def test_safe_request_classifies_dns_errors() -> None:
+    """Name resolution failures should be exposed as DNS-specific errors."""
+
+    class FakeSession:
+        def request(
+            self, *, method: str, url: str, timeout: int, **kwargs: object
+        ) -> requests.Response:
+            raise requests.ConnectionError(
+                "HTTPSConnection(host='api.flumewater.com', port=443): "
+                "Failed to resolve 'api.flumewater.com' "
+                "([Errno -3] Try again)"
+            )
+
+    with pytest.raises(IrrigationMonitorRequestDNSError, match="DNS"):
+        util.safe_request(
+            "https://api.flumewater.com/oauth/token",
+            method="POST",
+            session=FakeSession(),
+        )
+
+
+def test_create_retry_session_mounts_post_retry_adapter() -> None:
+    """The shared session should mount adapters that retry transient POST requests."""
+    session = _create_retry_session()
+    adapter = session.get_adapter("https://api.flumewater.com")
+    retries = adapter.max_retries
+
+    assert retries.total == util.REQUEST_RETRY_ATTEMPTS
+    assert retries.connect == util.REQUEST_RETRY_ATTEMPTS
+    assert retries.read == util.REQUEST_RETRY_ATTEMPTS
+    assert retries.status == util.REQUEST_RETRY_ATTEMPTS
+    assert retries.backoff_factor == util.REQUEST_RETRY_BACKOFF_FACTOR
+    assert retries.allowed_methods == util.REQUEST_RETRYABLE_METHODS
+    assert retries.status_forcelist == util.REQUEST_RETRYABLE_STATUS_CODES
 
 
 def test_flume_client_rejects_unauthorized_token_response(

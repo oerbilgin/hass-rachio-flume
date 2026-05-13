@@ -29,6 +29,8 @@ from .util import (
     FlumeDeviceError,
     FlumeTokenError,
     IrrigationMonitorCredentials,
+    IrrigationMonitorRequestAuthError,
+    IrrigationMonitorRequestError,
     RachioAuthenticationError,
     RachioClientError,
     WaterReportDataPoint,
@@ -106,13 +108,18 @@ class IrrigationMonitorApiClient:
                 self._get_credentials(),
                 self._get_flume_device_index(),
             )
-        except (FlumeAuthenticationError, RachioAuthenticationError) as exception:
+        except (
+            FlumeAuthenticationError,
+            IrrigationMonitorRequestAuthError,
+            RachioAuthenticationError,
+        ) as exception:
             raise IrrigationMonitorApiClientAuthenticationError(
                 exception
             ) from exception
         except (
             FlumeTokenError,
             FlumeDeviceError,
+            IrrigationMonitorRequestError,
             RachioClientError,
             IndexError,
             KeyError,
@@ -136,13 +143,18 @@ class IrrigationMonitorApiClient:
                 self._get_credentials(),
                 self._get_flume_device_index(),
             )
-        except (FlumeAuthenticationError, RachioAuthenticationError) as exception:
+        except (
+            FlumeAuthenticationError,
+            IrrigationMonitorRequestAuthError,
+            RachioAuthenticationError,
+        ) as exception:
             raise IrrigationMonitorApiClientAuthenticationError(
                 exception
             ) from exception
         except (
             FlumeTokenError,
             FlumeDeviceError,
+            IrrigationMonitorRequestError,
             RachioClientError,
             IndexError,
             KeyError,

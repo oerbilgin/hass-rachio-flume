@@ -21,7 +21,7 @@ import json
 import logging
 from dataclasses import dataclass
 from enum import Enum
-from typing import TYPE_CHECKING, Any, Literal, cast
+from typing import Any, Literal, cast
 from zoneinfo import ZoneInfo
 
 import requests
@@ -34,13 +34,17 @@ from pydantic import (
     field_validator,
     model_validator,
 )
-
-if TYPE_CHECKING:
-    from collections.abc import Callable
+from requests.adapters import HTTPAdapter
+from urllib3.exceptions import NameResolutionError
+from urllib3.util.retry import Retry
 
 logger = logging.getLogger(__name__)
 
 FLUME_DATETIME_FORMAT = "%Y-%m-%d %H:%M:%S"
+REQUEST_RETRY_ATTEMPTS = 3
+REQUEST_RETRY_BACKOFF_FACTOR = 0.5
+REQUEST_RETRYABLE_METHODS = frozenset({"GET", "POST"})
+REQUEST_RETRYABLE_STATUS_CODES = frozenset({429, 500, 502, 503, 504})
 
 
 class IrrigationMonitorRequestError(Exception):
@@ -57,6 +61,132 @@ class IrrigationMonitorRequestAuthError(IrrigationMonitorRequestError):
     """Raised when a vendor API rejects credentials or authorization."""
 
 
+class IrrigationMonitorRequestConnectionError(IrrigationMonitorRequestError):
+    """Raised when a request fails due to a transient connection problem."""
+
+
+class IrrigationMonitorRequestDNSError(IrrigationMonitorRequestConnectionError):
+    """Raised when a request fails because DNS resolution failed."""
+
+
+class IrrigationMonitorRequestTimeoutError(IrrigationMonitorRequestError):
+    """Raised when a request times out before a response arrives."""
+
+
+def _build_request_retry() -> Retry:
+    """Return the shared urllib3 retry policy used by all HTTP requests."""
+    return Retry(
+        total=REQUEST_RETRY_ATTEMPTS,
+        connect=REQUEST_RETRY_ATTEMPTS,
+        read=REQUEST_RETRY_ATTEMPTS,
+        status=REQUEST_RETRY_ATTEMPTS,
+        backoff_factor=REQUEST_RETRY_BACKOFF_FACTOR,
+        allowed_methods=REQUEST_RETRYABLE_METHODS,
+        status_forcelist=REQUEST_RETRYABLE_STATUS_CODES,
+        respect_retry_after_header=True,
+        raise_on_status=False,
+    )
+
+
+def _create_retry_session() -> requests.Session:
+    """Create a requests session with retry-enabled HTTP adapters mounted."""
+    session = requests.Session()
+    adapter = HTTPAdapter(max_retries=_build_request_retry())
+    session.mount("http://", adapter)
+    session.mount("https://", adapter)
+    return session
+
+
+_REQUEST_SESSION = _create_retry_session()
+
+
+def _get_request_session() -> requests.Session:
+    """Return the shared session used for outbound vendor API requests."""
+    return _REQUEST_SESSION
+
+
+def _collect_exception_chain(exception: BaseException) -> list[BaseException]:
+    """Flatten linked exceptions so request failures can be classified."""
+    seen: set[int] = set()
+    stack = [exception]
+    chain: list[BaseException] = []
+
+    while stack:
+        current = stack.pop()
+        current_id = id(current)
+        if current_id in seen:
+            continue
+
+        seen.add(current_id)
+        chain.append(current)
+
+        for attribute in ("__cause__", "__context__", "reason"):
+            nested = getattr(current, attribute, None)
+            if isinstance(nested, BaseException):
+                stack.append(nested)
+
+        stack.extend(
+            arg
+            for arg in getattr(current, "args", ())
+            if isinstance(arg, BaseException)
+        )
+
+    return chain
+
+
+def _summarize_request_exception(
+    exception: requests.RequestException,
+) -> dict[str, Any]:
+    """Return a small serializable summary for a failed request exception."""
+    chain = _collect_exception_chain(exception)
+    root_exception = chain[-1]
+    detail = {
+        "error_type": type(root_exception).__name__,
+        "error": str(root_exception),
+    }
+
+    if request := getattr(exception, "request", None):
+        request_method = getattr(request, "method", None)
+        if isinstance(request_method, str):
+            detail["request_method"] = request_method
+
+    return detail
+
+
+def _is_dns_resolution_error(exception: requests.RequestException) -> bool:
+    """Return True when the exception chain includes a DNS resolution failure."""
+    for nested_exception in _collect_exception_chain(exception):
+        if isinstance(nested_exception, NameResolutionError):
+            return True
+        message = str(nested_exception)
+        if "Failed to resolve" in message or "NameResolutionError" in message:
+            return True
+    return False
+
+
+def _classify_request_exception(
+    url: str,
+    exception: requests.RequestException,
+) -> IrrigationMonitorRequestError:
+    """Map requests exceptions to integration-specific transient error types."""
+    detail = {"url": url} | _summarize_request_exception(exception)
+
+    if isinstance(exception, requests.Timeout):
+        msg = "Request timed out"
+        return IrrigationMonitorRequestTimeoutError(msg, detail)
+
+    if isinstance(exception, requests.ConnectionError):
+        if _is_dns_resolution_error(exception):
+            msg = "Request failed due to DNS resolution error"
+            return IrrigationMonitorRequestDNSError(msg, detail)
+
+        msg = "Request failed due to connection error"
+        return IrrigationMonitorRequestConnectionError(msg, detail)
+
+    msg = "Request failed"
+    return IrrigationMonitorRequestError(msg, detail)
+
+
 def _summarize_response(response: requests.Response | None) -> dict[str, Any]:
     """Return a small serializable summary for a failed HTTP response."""
     if response is None:
@@ -71,8 +201,9 @@ def _summarize_response(response: requests.Response | None) -> dict[str, Any]:
 def safe_request(
     url: str,
     timeout: int = 10,
-    method: Callable = requests.get,
-    **kwargs: dict[str, Any],
+    method: str = "GET",
+    session: requests.Session | None = None,
+    **kwargs: Any,
 ) -> dict:
     """
     Make an HTTP request and return parsed JSON.
@@ -81,8 +212,14 @@ def safe_request(
     difference between authorization failures and transient communication or
     response-format problems.
     """
+    request_session = session or _get_request_session()
     try:
-        response = method(url, timeout=timeout, **kwargs)
+        response = request_session.request(
+            method=method,
+            url=url,
+            timeout=timeout,
+            **kwargs,
+        )
         response.raise_for_status()
     except requests.HTTPError as exception:
         detail = _summarize_response(exception.response)
@@ -101,8 +238,7 @@ def safe_request(
         raise IrrigationMonitorRequestError(msg, {"url": url} | detail) from exception
     except requests.RequestException as exception:
         logger.warning("Request failed: %s", url, exc_info=exception)
-        msg = "Request failed"
-        raise IrrigationMonitorRequestError(msg, {"url": url}) from exception
+        raise _classify_request_exception(url, exception) from exception
 
     try:
         response_json = response.json()
@@ -323,7 +459,7 @@ class FlumeClient:
         headers = {"accept": "application/json", "content-type": "application/json"}
         try:
             response_json = safe_request(
-                url, method=requests.post, json=payload, headers=headers
+                url, method="POST", json=payload, headers=headers
             )
         except IrrigationMonitorRequestAuthError as exception:
             msg = "Flume credentials were rejected"
@@ -427,9 +563,7 @@ class FlumeClient:
         data_collect = []
         for q in qlist:
             payload = {"queries": [query.as_payload() for query in q]}
-            result = safe_request(
-                url, method=requests.post, json=payload, headers=headers
-            )
+            result = safe_request(url, method="POST", json=payload, headers=headers)
             if result:
                 for query_result in result.get("data", []):
                     for request_id, data in query_result.items():
