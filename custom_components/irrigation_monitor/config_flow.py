@@ -66,49 +66,51 @@ class IrrigationConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     @staticmethod
     def _build_schema(user_input: dict[str, Any] | None = None) -> vol.Schema:
         """Build the shared schema used by initial setup and reauth."""
-        return vol.Schema({
-            vol.Required(
-                CONF_FLUME_USER,
-                default=(user_input or {}).get(CONF_FLUME_USER, vol.UNDEFINED),
-            ): selector.TextSelector(
-                selector.TextSelectorConfig(
-                    type=selector.TextSelectorType.TEXT,
+        return vol.Schema(
+            {
+                vol.Required(
+                    CONF_FLUME_USER,
+                    default=(user_input or {}).get(CONF_FLUME_USER, vol.UNDEFINED),
+                ): selector.TextSelector(
+                    selector.TextSelectorConfig(
+                        type=selector.TextSelectorType.TEXT,
+                    ),
                 ),
-            ),
-            vol.Required(CONF_FLUME_PASS): selector.TextSelector(
-                selector.TextSelectorConfig(
-                    type=selector.TextSelectorType.PASSWORD,
+                vol.Required(CONF_FLUME_PASS): selector.TextSelector(
+                    selector.TextSelectorConfig(
+                        type=selector.TextSelectorType.PASSWORD,
+                    ),
                 ),
-            ),
-            vol.Required(
-                CONF_FLUME_CLIENT_ID,
-                default=(user_input or {}).get(CONF_FLUME_CLIENT_ID, vol.UNDEFINED),
-            ): selector.TextSelector(
-                selector.TextSelectorConfig(
-                    type=selector.TextSelectorType.TEXT,
+                vol.Required(
+                    CONF_FLUME_CLIENT_ID,
+                    default=(user_input or {}).get(CONF_FLUME_CLIENT_ID, vol.UNDEFINED),
+                ): selector.TextSelector(
+                    selector.TextSelectorConfig(
+                        type=selector.TextSelectorType.TEXT,
+                    ),
                 ),
-            ),
-            vol.Required(CONF_FLUME_CLIENT_SECRET): selector.TextSelector(
-                selector.TextSelectorConfig(
-                    type=selector.TextSelectorType.PASSWORD,
+                vol.Required(CONF_FLUME_CLIENT_SECRET): selector.TextSelector(
+                    selector.TextSelectorConfig(
+                        type=selector.TextSelectorType.PASSWORD,
+                    ),
                 ),
-            ),
-            vol.Required(CONF_RACHIO_TOKEN): selector.TextSelector(
-                selector.TextSelectorConfig(
-                    type=selector.TextSelectorType.PASSWORD,
+                vol.Required(CONF_RACHIO_TOKEN): selector.TextSelector(
+                    selector.TextSelectorConfig(
+                        type=selector.TextSelectorType.PASSWORD,
+                    ),
                 ),
-            ),
-            vol.Optional(
-                CONF_FLUME_DEVICE_INDEX,
-                default=(user_input or {}).get(CONF_FLUME_DEVICE_INDEX, 0),
-            ): selector.NumberSelector(
-                selector.NumberSelectorConfig(
-                    min=0,
-                    mode=selector.NumberSelectorMode.BOX,
-                    step=1,
+                vol.Optional(
+                    CONF_FLUME_DEVICE_INDEX,
+                    default=(user_input or {}).get(CONF_FLUME_DEVICE_INDEX, 0),
+                ): selector.NumberSelector(
+                    selector.NumberSelectorConfig(
+                        min=0,
+                        mode=selector.NumberSelectorMode.BOX,
+                        step=1,
+                    ),
                 ),
-            ),
-        })
+            }
+        )
 
     async def async_step_reauth(
         self,

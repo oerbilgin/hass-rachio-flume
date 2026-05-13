@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-# ruff: noqa: S101, S106, TID252
+# ruff: noqa: S101, S106, TID252, ARG001, ARG002, ARG005, EM101, TRY003, PLR2004
 import datetime
 
 import pytest
