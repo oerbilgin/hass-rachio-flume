@@ -88,7 +88,7 @@ async def async_setup_entry(
 
 
 def _build_event_id(datapoint: WaterReportDataPoint) -> str:
-    """Build a stable identifier for one watering event."""
+    """Stable identifier for one watering event is the start time plus zone id."""
     start_time = datapoint.watering_start_time.isoformat()
     return f"{datapoint.zone_id}:{start_time}"
 
@@ -126,7 +126,11 @@ class IrrigationZoneReportEntity(IrrigationMonitorEntity, SensorEntity):
 
     @property
     def _event_id(self) -> str | None:
-        """Return a stable identifier for the latest watering event."""
+        """
+        Return a stable identifier for the latest watering event.
+
+        This is the watering event start time plus zone id.
+        """
         datapoint = self._report_datapoint
         if datapoint is None:
             return None
@@ -150,8 +154,6 @@ class IrrigationZoneReportEntity(IrrigationMonitorEntity, SensorEntity):
 
 class IrrigationZoneLastWateringSensor(IrrigationZoneReportEntity):
     """Represent the latest watering event marker for one zone."""
-
-    _attr_entity_registry_enabled_default = False
 
     def __init__(
         self,
@@ -232,19 +234,28 @@ class IrrigationZoneWaterTotalSensor(IrrigationZoneReportEntity, RestoreEntity):
         self._attr_name = f"Zone {zone_name} total water used"
         self._accumulated_gallons: float | None = None
         self._last_processed_event_id: str | None = None
+        self._has_restored_state = False
+        self._restored_total_valid = False
 
     async def async_added_to_hass(self) -> None:
         """Restore the accumulated total and last processed event after restart."""
         await super().async_added_to_hass()
 
         if (last_state := await self.async_get_last_state()) is not None:
+            self._has_restored_state = True
             try:
                 self._accumulated_gallons = float(last_state.state)
+                self._restored_total_valid = True
             except TypeError, ValueError:
                 self._accumulated_gallons = None
-            self._last_processed_event_id = last_state.attributes.get("event_id")
+            restored_event_id = last_state.attributes.get("last_processed_event_id")
+            if isinstance(restored_event_id, str):
+                self._last_processed_event_id = restored_event_id
 
-        self._apply_latest_event()
+        if not self._has_restored_state or self._restored_total_valid:
+            self._apply_latest_event()
+        else:
+            self._mark_current_event_processed()
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
@@ -264,7 +275,11 @@ class IrrigationZoneWaterTotalSensor(IrrigationZoneReportEntity, RestoreEntity):
         super()._handle_coordinator_update()
 
     def _apply_latest_event(self) -> None:
-        """Add the latest event once, keyed by the stable event identifier."""
+        """
+        Add the latest event once, keyed by the stable event identifier.
+
+        The stable event identifier is the start time plus zone id.
+        """
         datapoint = self._report_datapoint
         event_id = self._event_id
         if datapoint is None or event_id is None:
@@ -282,6 +297,11 @@ class IrrigationZoneWaterTotalSensor(IrrigationZoneReportEntity, RestoreEntity):
 
         self._accumulated_gallons += float(gallons_used)
         self._last_processed_event_id = event_id
+
+    def _mark_current_event_processed(self) -> None:
+        """Seed the dedupe marker without rebasing totals to the current event."""
+        if event_id := self._event_id:
+            self._last_processed_event_id = event_id
 
 
 class IrrigationSystemWaterTotalSensor(
@@ -302,14 +322,18 @@ class IrrigationSystemWaterTotalSensor(
         self._attr_name = "Irrigation total water used"
         self._accumulated_gallons: float | None = None
         self._last_processed_event_ids: dict[str, str] = {}
+        self._has_restored_state = False
+        self._restored_total_valid = False
 
     async def async_added_to_hass(self) -> None:
         """Restore the accumulated total and processed per-zone event ids."""
         await super().async_added_to_hass()
 
         if (last_state := await self.async_get_last_state()) is not None:
+            self._has_restored_state = True
             try:
                 self._accumulated_gallons = float(last_state.state)
+                self._restored_total_valid = True
             except TypeError, ValueError:
                 self._accumulated_gallons = None
 
@@ -319,7 +343,10 @@ class IrrigationSystemWaterTotalSensor(
                     str(key): str(value) for key, value in restored_event_ids.items()
                 }
 
-        self._apply_latest_events()
+        if not self._has_restored_state or self._restored_total_valid:
+            self._apply_latest_events()
+        else:
+            self._mark_current_events_processed()
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
@@ -364,3 +391,15 @@ class IrrigationSystemWaterTotalSensor(
             self._accumulated_gallons = 0.0
 
         self._accumulated_gallons += gallons_to_add
+
+    def _mark_current_events_processed(self) -> None:
+        """Seed per-zone dedupe markers without rebasing the restored total."""
+        report = self.coordinator.data
+        if not report:
+            return
+
+        self._last_processed_event_ids = {
+            str(datapoint.zone_id): _build_event_id(datapoint)
+            for datapoint in report
+            if datapoint.total_gallons_used is not None
+        }
