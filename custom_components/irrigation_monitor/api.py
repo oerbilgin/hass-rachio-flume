@@ -25,9 +25,12 @@ from .const import (
     CONF_RACHIO_TOKEN,
 )
 from .util import (
+    FlumeAuthenticationError,
+    FlumeDeviceError,
     FlumeTokenError,
     IrrigationMonitorCredentials,
-    RachioClient,
+    RachioAuthenticationError,
+    RachioClientError,
     WaterReportDataPoint,
     poll_for_irrigation_usage,
 )
@@ -103,11 +106,19 @@ class IrrigationMonitorApiClient:
                 self._get_credentials(),
                 self._get_flume_device_index(),
             )
-        except FlumeTokenError as exception:
+        except (FlumeAuthenticationError, RachioAuthenticationError) as exception:
             raise IrrigationMonitorApiClientAuthenticationError(
                 exception
             ) from exception
-        except IndexError as exception:
+        except (
+            FlumeTokenError,
+            FlumeDeviceError,
+            RachioClientError,
+            IndexError,
+            KeyError,
+            TypeError,
+            ValueError,
+        ) as exception:
             raise IrrigationMonitorApiClientCommunicationError(exception) from exception
         except Exception as exception:
             raise IrrigationMonitorApiClientError(exception) from exception
@@ -125,19 +136,21 @@ class IrrigationMonitorApiClient:
                 self._get_credentials(),
                 self._get_flume_device_index(),
             )
-        except FlumeTokenError as exception:
+        except (FlumeAuthenticationError, RachioAuthenticationError) as exception:
             raise IrrigationMonitorApiClientAuthenticationError(
                 exception
             ) from exception
-        except IndexError as exception:
+        except (
+            FlumeTokenError,
+            FlumeDeviceError,
+            RachioClientError,
+            IndexError,
+            KeyError,
+            TypeError,
+            ValueError,
+        ) as exception:
             raise IrrigationMonitorApiClientCommunicationError(exception) from exception
         except Exception as exception:
-            try:
-                RachioClient(token=self._config[CONF_RACHIO_TOKEN])
-            except Exception as rachio_exception:
-                raise IrrigationMonitorApiClientAuthenticationError(
-                    rachio_exception
-                ) from rachio_exception
             raise IrrigationMonitorApiClientError(exception) from exception
 
     async def _async_call_poll_in_thread(self) -> list[WaterReportDataPoint]:

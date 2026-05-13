@@ -21,7 +21,6 @@ import json
 import logging
 from dataclasses import dataclass
 from enum import Enum
-from functools import reduce
 from typing import TYPE_CHECKING, Any, Literal, cast
 from zoneinfo import ZoneInfo
 
@@ -44,6 +43,31 @@ logger = logging.getLogger(__name__)
 FLUME_DATETIME_FORMAT = "%Y-%m-%d %H:%M:%S"
 
 
+class IrrigationMonitorRequestError(Exception):
+    """Raised when an HTTP request fails or returns unusable data."""
+
+    def __init__(self, message: str, detail: Any | None = None) -> None:
+        """Initialize the error with an optional detail payload."""
+        if detail is not None:
+            message = f"{message}: {detail!r}"
+        super().__init__(message)
+
+
+class IrrigationMonitorRequestAuthError(IrrigationMonitorRequestError):
+    """Raised when a vendor API rejects credentials or authorization."""
+
+
+def _summarize_response(response: requests.Response | None) -> dict[str, Any]:
+    """Return a small serializable summary for a failed HTTP response."""
+    if response is None:
+        return {}
+
+    detail: dict[str, Any] = {"status_code": response.status_code}
+    if response.text:
+        detail["body"] = response.text[:500]
+    return detail
+
+
 def safe_request(
     url: str,
     timeout: int = 10,
@@ -51,18 +75,50 @@ def safe_request(
     **kwargs: dict[str, Any],
 ) -> dict:
     """
-    Make an HTTP request and return parsed JSON or an empty dict on failure.
+    Make an HTTP request and return parsed JSON.
 
-    This helper keeps the lower-level client code compact and ensures request
-    failures are logged in one place.
+    This helper keeps the lower-level client code compact while preserving the
+    difference between authorization failures and transient communication or
+    response-format problems.
     """
     try:
         response = method(url, timeout=timeout, **kwargs)
         response.raise_for_status()
-        return response.json()
-    except Exception:
-        logger.exception("Request failed: %s", url)
-    return {}
+    except requests.HTTPError as exception:
+        detail = _summarize_response(exception.response)
+        if exception.response is not None and exception.response.status_code in {
+            401,
+            403,
+        }:
+            logger.warning("Request authorization failed: %s", url)
+            msg = "Request authorization failed"
+            raise IrrigationMonitorRequestAuthError(
+                msg, {"url": url} | detail
+            ) from exception
+
+        logger.warning("Request failed: %s", url)
+        msg = "Request failed"
+        raise IrrigationMonitorRequestError(msg, {"url": url} | detail) from exception
+    except requests.RequestException as exception:
+        logger.warning("Request failed: %s", url, exc_info=exception)
+        msg = "Request failed"
+        raise IrrigationMonitorRequestError(msg, {"url": url}) from exception
+
+    try:
+        response_json = response.json()
+    except ValueError as exception:
+        logger.warning("Response was not valid JSON: %s", url, exc_info=exception)
+        msg = "Response was not valid JSON"
+        raise IrrigationMonitorRequestError(msg, {"url": url}) from exception
+
+    if not isinstance(response_json, dict):
+        msg = "Response JSON must be an object"
+        raise IrrigationMonitorRequestError(
+            msg,
+            {"url": url, "response_type": type(response_json).__name__},
+        )
+
+    return response_json
 
 
 class DeviceType(Enum):
@@ -84,7 +140,17 @@ class FlumeDevice:
 
 
 class FlumeTokenError(Exception):
-    """Raised when Flume authentication or metadata retrieval fails."""
+    """Raised when Flume returns an unusable token payload."""
+
+    def __init__(self, message: str, detail: Any | None = None) -> None:
+        """Initialize the error with an optional detail payload."""
+        if detail is not None:
+            message = f"{message}: {detail!r}"
+        super().__init__(message)
+
+
+class FlumeAuthenticationError(Exception):
+    """Raised when Flume credentials are rejected."""
 
     def __init__(self, message: str, detail: Any | None = None) -> None:
         """Initialize the error with an optional detail payload."""
@@ -259,7 +325,10 @@ class FlumeClient:
             response_json = safe_request(
                 url, method=requests.post, json=payload, headers=headers
             )
-        except Exception as exception:
+        except IrrigationMonitorRequestAuthError as exception:
+            msg = "Flume credentials were rejected"
+            raise FlumeAuthenticationError(msg) from exception
+        except IrrigationMonitorRequestError as exception:
             msg = "Request to get Flume access token failed"
             raise FlumeTokenError(msg) from exception
         if data := response_json.get("data"):
@@ -299,9 +368,12 @@ class FlumeClient:
         url = f"https://api.flumewater.com/users/{self.user_id}/devices?location=true"
         try:
             return safe_request(url, headers={"Authorization": f"Bearer {self.token}"})
-        except Exception as exception:
+        except IrrigationMonitorRequestAuthError as exception:
+            msg = "Flume access token is no longer authorized"
+            raise FlumeAuthenticationError(msg) from exception
+        except IrrigationMonitorRequestError as exception:
             msg = "Request to get Flume device info failed"
-            raise FlumeTokenError(msg) from exception
+            raise FlumeDeviceError(msg) from exception
 
     @property
     def devices(self) -> list[FlumeDevice]:
@@ -380,6 +452,10 @@ class RachioClientError(Exception):
         super().__init__(message)
 
 
+class RachioAuthenticationError(RachioClientError):
+    """Raised when Rachio credentials are rejected."""
+
+
 @dataclass
 class RachioZoneWateringSummary:
     """Summarize the last observed watering run for a Rachio zone."""
@@ -415,7 +491,10 @@ class RachioClient:
                 "https://api.rach.io/1/public/person/info",
                 headers={"Authorization": f"Bearer {self._token}"},
             )
-        except Exception as exception:
+        except IrrigationMonitorRequestAuthError as exception:
+            msg = "Rachio credentials were rejected"
+            raise RachioAuthenticationError(msg) from exception
+        except IrrigationMonitorRequestError as exception:
             msg = "Request to get Rachio person ID failed"
             raise RachioClientError(msg) from exception
         if not isinstance(r, dict):
@@ -434,7 +513,10 @@ class RachioClient:
                 f"https://api.rach.io/1/public/person/{self._person_id}",
                 headers={"Authorization": f"Bearer {self._token}"},
             )
-        except Exception as exception:
+        except IrrigationMonitorRequestAuthError as exception:
+            msg = "Rachio credentials were rejected"
+            raise RachioAuthenticationError(msg) from exception
+        except IrrigationMonitorRequestError as exception:
             msg = "Request to get Rachio person info failed"
             raise RachioClientError(msg) from exception
 
@@ -580,9 +662,9 @@ def poll_for_irrigation_usage(
     )
 
     # Merge the Flume totals into a single lookup keyed by Rachio zone name.
-    water_data_dict = reduce(
-        lambda a, b: a | b, [x.to_usage_dict() for x in water_data]
-    )
+    water_data_dict: dict[str, float] = {}
+    for request_data in water_data:
+        water_data_dict.update(request_data.to_usage_dict())
 
     # construct the final report data
     report_data = []
@@ -592,7 +674,7 @@ def poll_for_irrigation_usage(
             zone_id=watering.zone_id,
             watering_start_time=watering.last_watering_start_time,
             watering_stop_time=watering.last_watering_stop_time,
-            total_gallons_used=water_data_dict.get(watering.zone_name, None),
+            total_gallons_used=water_data_dict.get(watering.zone_name),
             total_watering_minutes=watering.last_watering_duration_minutes,
         )
         report_data.append(datapoint)
