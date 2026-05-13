@@ -21,10 +21,9 @@ import json
 import logging
 from dataclasses import dataclass
 from enum import Enum
-from functools import reduce
-from typing import TYPE_CHECKING, Any, Literal, cast
+from typing import Any, Literal, cast
+from zoneinfo import ZoneInfo
 
-import pytz
 import requests
 from pydantic import (
     BaseModel,
@@ -35,34 +34,227 @@ from pydantic import (
     field_validator,
     model_validator,
 )
-
-if TYPE_CHECKING:
-    from collections.abc import Callable
+from requests.adapters import HTTPAdapter
+from urllib3.exceptions import NameResolutionError
+from urllib3.util.retry import Retry
 
 logger = logging.getLogger(__name__)
 
 FLUME_DATETIME_FORMAT = "%Y-%m-%d %H:%M:%S"
+REQUEST_RETRY_ATTEMPTS = 3
+REQUEST_RETRY_BACKOFF_FACTOR = 0.5
+REQUEST_RETRYABLE_METHODS = frozenset({"GET", "POST"})
+REQUEST_RETRYABLE_STATUS_CODES = frozenset({429, 500, 502, 503, 504})
+
+
+class IrrigationMonitorRequestError(Exception):
+    """Raised when an HTTP request fails or returns unusable data."""
+
+    def __init__(self, message: str, detail: Any | None = None) -> None:
+        """Initialize the error with an optional detail payload."""
+        if detail is not None:
+            message = f"{message}: {detail!r}"
+        super().__init__(message)
+
+
+class IrrigationMonitorRequestAuthError(IrrigationMonitorRequestError):
+    """Raised when a vendor API rejects credentials or authorization."""
+
+
+class IrrigationMonitorRequestConnectionError(IrrigationMonitorRequestError):
+    """Raised when a request fails due to a transient connection problem."""
+
+
+class IrrigationMonitorRequestDNSError(IrrigationMonitorRequestConnectionError):
+    """Raised when a request fails because DNS resolution failed."""
+
+
+class IrrigationMonitorRequestTimeoutError(IrrigationMonitorRequestError):
+    """Raised when a request times out before a response arrives."""
+
+
+def _build_request_retry() -> Retry:
+    """Return the shared urllib3 retry policy used by all HTTP requests."""
+    return Retry(
+        total=REQUEST_RETRY_ATTEMPTS,
+        connect=REQUEST_RETRY_ATTEMPTS,
+        read=REQUEST_RETRY_ATTEMPTS,
+        status=REQUEST_RETRY_ATTEMPTS,
+        backoff_factor=REQUEST_RETRY_BACKOFF_FACTOR,
+        allowed_methods=REQUEST_RETRYABLE_METHODS,
+        status_forcelist=REQUEST_RETRYABLE_STATUS_CODES,
+        respect_retry_after_header=True,
+        raise_on_status=False,
+    )
+
+
+def _create_retry_session() -> requests.Session:
+    """Create a requests session with retry-enabled HTTP adapters mounted."""
+    session = requests.Session()
+    adapter = HTTPAdapter(max_retries=_build_request_retry())
+    session.mount("http://", adapter)
+    session.mount("https://", adapter)
+    return session
+
+
+_REQUEST_SESSION = _create_retry_session()
+
+
+def _get_request_session() -> requests.Session:
+    """Return the shared session used for outbound vendor API requests."""
+    return _REQUEST_SESSION
+
+
+def _collect_exception_chain(exception: BaseException) -> list[BaseException]:
+    """Flatten linked exceptions so request failures can be classified."""
+    seen: set[int] = set()
+    stack = [exception]
+    chain: list[BaseException] = []
+
+    while stack:
+        current = stack.pop()
+        current_id = id(current)
+        if current_id in seen:
+            continue
+
+        seen.add(current_id)
+        chain.append(current)
+
+        for attribute in ("__cause__", "__context__", "reason"):
+            nested = getattr(current, attribute, None)
+            if isinstance(nested, BaseException):
+                stack.append(nested)
+
+        stack.extend(
+            arg
+            for arg in getattr(current, "args", ())
+            if isinstance(arg, BaseException)
+        )
+
+    return chain
+
+
+def _summarize_request_exception(
+    exception: requests.RequestException,
+) -> dict[str, Any]:
+    """Return a small serializable summary for a failed request exception."""
+    chain = _collect_exception_chain(exception)
+    root_exception = chain[-1]
+    detail = {
+        "error_type": type(root_exception).__name__,
+        "error": str(root_exception),
+    }
+
+    if request := getattr(exception, "request", None):
+        request_method = getattr(request, "method", None)
+        if isinstance(request_method, str):
+            detail["request_method"] = request_method
+
+    return detail
+
+
+def _is_dns_resolution_error(exception: requests.RequestException) -> bool:
+    """Return True when the exception chain includes a DNS resolution failure."""
+    for nested_exception in _collect_exception_chain(exception):
+        if isinstance(nested_exception, NameResolutionError):
+            return True
+        message = str(nested_exception)
+        if "Failed to resolve" in message or "NameResolutionError" in message:
+            return True
+    return False
+
+
+def _classify_request_exception(
+    url: str,
+    exception: requests.RequestException,
+) -> IrrigationMonitorRequestError:
+    """Map requests exceptions to integration-specific transient error types."""
+    detail = {"url": url} | _summarize_request_exception(exception)
+
+    if isinstance(exception, requests.Timeout):
+        msg = "Request timed out"
+        return IrrigationMonitorRequestTimeoutError(msg, detail)
+
+    if isinstance(exception, requests.ConnectionError):
+        if _is_dns_resolution_error(exception):
+            msg = "Request failed due to DNS resolution error"
+            return IrrigationMonitorRequestDNSError(msg, detail)
+
+        msg = "Request failed due to connection error"
+        return IrrigationMonitorRequestConnectionError(msg, detail)
+
+    msg = "Request failed"
+    return IrrigationMonitorRequestError(msg, detail)
+
+
+def _summarize_response(response: requests.Response | None) -> dict[str, Any]:
+    """Return a small serializable summary for a failed HTTP response."""
+    if response is None:
+        return {}
+
+    detail: dict[str, Any] = {"status_code": response.status_code}
+    if response.text:
+        detail["body"] = response.text[:500]
+    return detail
 
 
 def safe_request(
     url: str,
     timeout: int = 10,
-    method: Callable = requests.get,
-    **kwargs: dict[str, Any],
+    method: str = "GET",
+    session: requests.Session | None = None,
+    **kwargs: Any,
 ) -> dict:
     """
-    Make an HTTP request and return parsed JSON or an empty dict on failure.
+    Make an HTTP request and return parsed JSON.
 
-    This helper keeps the lower-level client code compact and ensures request
-    failures are logged in one place.
+    This helper keeps the lower-level client code compact while preserving the
+    difference between authorization failures and transient communication or
+    response-format problems.
     """
+    request_session = session or _get_request_session()
     try:
-        response = method(url, timeout=timeout, **kwargs)
+        response = request_session.request(
+            method=method,
+            url=url,
+            timeout=timeout,
+            **kwargs,
+        )
         response.raise_for_status()
-        return response.json()
-    except Exception:
-        logger.exception("Request failed: %s", url)
-    return {}
+    except requests.HTTPError as exception:
+        detail = _summarize_response(exception.response)
+        if exception.response is not None and exception.response.status_code in {
+            401,
+            403,
+        }:
+            logger.warning("Request authorization failed: %s", url)
+            msg = "Request authorization failed"
+            raise IrrigationMonitorRequestAuthError(
+                msg, {"url": url} | detail
+            ) from exception
+
+        logger.warning("Request failed: %s", url)
+        msg = "Request failed"
+        raise IrrigationMonitorRequestError(msg, {"url": url} | detail) from exception
+    except requests.RequestException as exception:
+        logger.warning("Request failed: %s", url, exc_info=exception)
+        raise _classify_request_exception(url, exception) from exception
+
+    try:
+        response_json = response.json()
+    except ValueError as exception:
+        logger.warning("Response was not valid JSON: %s", url, exc_info=exception)
+        msg = "Response was not valid JSON"
+        raise IrrigationMonitorRequestError(msg, {"url": url}) from exception
+
+    if not isinstance(response_json, dict):
+        msg = "Response JSON must be an object"
+        raise IrrigationMonitorRequestError(
+            msg,
+            {"url": url, "response_type": type(response_json).__name__},
+        )
+
+    return response_json
 
 
 class DeviceType(Enum):
@@ -84,7 +276,17 @@ class FlumeDevice:
 
 
 class FlumeTokenError(Exception):
-    """Raised when Flume authentication or metadata retrieval fails."""
+    """Raised when Flume returns an unusable token payload."""
+
+    def __init__(self, message: str, detail: Any | None = None) -> None:
+        """Initialize the error with an optional detail payload."""
+        if detail is not None:
+            message = f"{message}: {detail!r}"
+        super().__init__(message)
+
+
+class FlumeAuthenticationError(Exception):
+    """Raised when Flume credentials are rejected."""
 
     def __init__(self, message: str, detail: Any | None = None) -> None:
         """Initialize the error with an optional detail payload."""
@@ -257,9 +459,12 @@ class FlumeClient:
         headers = {"accept": "application/json", "content-type": "application/json"}
         try:
             response_json = safe_request(
-                url, method=requests.post, json=payload, headers=headers
+                url, method="POST", json=payload, headers=headers
             )
-        except Exception as exception:
+        except IrrigationMonitorRequestAuthError as exception:
+            msg = "Flume credentials were rejected"
+            raise FlumeAuthenticationError(msg) from exception
+        except IrrigationMonitorRequestError as exception:
             msg = "Request to get Flume access token failed"
             raise FlumeTokenError(msg) from exception
         if data := response_json.get("data"):
@@ -299,9 +504,12 @@ class FlumeClient:
         url = f"https://api.flumewater.com/users/{self.user_id}/devices?location=true"
         try:
             return safe_request(url, headers={"Authorization": f"Bearer {self.token}"})
-        except Exception as exception:
+        except IrrigationMonitorRequestAuthError as exception:
+            msg = "Flume access token is no longer authorized"
+            raise FlumeAuthenticationError(msg) from exception
+        except IrrigationMonitorRequestError as exception:
             msg = "Request to get Flume device info failed"
-            raise FlumeTokenError(msg) from exception
+            raise FlumeDeviceError(msg) from exception
 
     @property
     def devices(self) -> list[FlumeDevice]:
@@ -313,12 +521,15 @@ class FlumeClient:
             device = FlumeDevice(
                 device_id=device_data.get("id"),
                 device_name=(
-                    f"{location_data.get('name', '')} "
-                    f"({location_data.get('address', '')})"
+                    f"{location_data.get('name', 'unknown_name')} "
+                    f"({location_data.get('address', 'unknown_address')})"
                 ),
                 device_timezone=location_data.get("tz"),
                 device_type=DeviceType(device_data.get("type", 0)),
             )
+            if not device.device_timezone:
+                msg = "Device missing timezone info"
+                raise FlumeDeviceError(msg, device_data)
             result.append(device)
         if not result:
             msg = "No devices found in Flume info response"
@@ -352,9 +563,7 @@ class FlumeClient:
         data_collect = []
         for q in qlist:
             payload = {"queries": [query.as_payload() for query in q]}
-            result = safe_request(
-                url, method=requests.post, json=payload, headers=headers
-            )
+            result = safe_request(url, method="POST", json=payload, headers=headers)
             if result:
                 for query_result in result.get("data", []):
                     for request_id, data in query_result.items():
@@ -375,6 +584,10 @@ class RachioClientError(Exception):
         if detail is not None:
             message = f"{message}: {detail!r}"
         super().__init__(message)
+
+
+class RachioAuthenticationError(RachioClientError):
+    """Raised when Rachio credentials are rejected."""
 
 
 @dataclass
@@ -412,7 +625,10 @@ class RachioClient:
                 "https://api.rach.io/1/public/person/info",
                 headers={"Authorization": f"Bearer {self._token}"},
             )
-        except Exception as exception:
+        except IrrigationMonitorRequestAuthError as exception:
+            msg = "Rachio credentials were rejected"
+            raise RachioAuthenticationError(msg) from exception
+        except IrrigationMonitorRequestError as exception:
             msg = "Request to get Rachio person ID failed"
             raise RachioClientError(msg) from exception
         if not isinstance(r, dict):
@@ -431,7 +647,10 @@ class RachioClient:
                 f"https://api.rach.io/1/public/person/{self._person_id}",
                 headers={"Authorization": f"Bearer {self._token}"},
             )
-        except Exception as exception:
+        except IrrigationMonitorRequestAuthError as exception:
+            msg = "Rachio credentials were rejected"
+            raise RachioAuthenticationError(msg) from exception
+        except IrrigationMonitorRequestError as exception:
             msg = "Request to get Rachio person info failed"
             raise RachioClientError(msg) from exception
 
@@ -446,7 +665,7 @@ class RachioClient:
         last_water_start_datetime = datetime.datetime.fromtimestamp(
             last_water_start_timestamp / 1000,
             tz=datetime.UTC,
-        ).astimezone(pytz.timezone(local_timezone))
+        ).astimezone(ZoneInfo(local_timezone))
         last_water_stop_datetime = last_water_start_datetime + watering_duration_td
         sqft = zone_info["yardAreaSquareFeet"]
         inph = zone_info["customNozzle"]["inchesPerHour"]
@@ -577,9 +796,9 @@ def poll_for_irrigation_usage(
     )
 
     # Merge the Flume totals into a single lookup keyed by Rachio zone name.
-    water_data_dict = reduce(
-        lambda a, b: a | b, [x.to_usage_dict() for x in water_data]
-    )
+    water_data_dict: dict[str, float] = {}
+    for request_data in water_data:
+        water_data_dict.update(request_data.to_usage_dict())
 
     # construct the final report data
     report_data = []
@@ -589,7 +808,7 @@ def poll_for_irrigation_usage(
             zone_id=watering.zone_id,
             watering_start_time=watering.last_watering_start_time,
             watering_stop_time=watering.last_watering_stop_time,
-            total_gallons_used=water_data_dict.get(watering.zone_name, None),
+            total_gallons_used=water_data_dict.get(watering.zone_name),
             total_watering_minutes=watering.last_watering_duration_minutes,
         )
         report_data.append(datapoint)
