@@ -2,6 +2,9 @@
     "name": "ludeeus/integration_blueprint",
     "image": "mcr.microsoft.com/devcontainers/base:debian",
     "postCreateCommand": "scripts/setup",
+    "mounts": [
+        "source=${localEnv:HOME}/.ssh,target=/home/vscode/.ssh,type=bind,readonly"
+    ],
     "forwardPorts": [
         8123
     ],

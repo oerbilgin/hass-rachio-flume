@@ -16,6 +16,8 @@ validated, this is the module to edit.
 
 from __future__ import annotations
 
+from typing import Any
+
 import voluptuous as vol
 from homeassistant import config_entries
 from homeassistant.helpers import selector
@@ -50,6 +52,8 @@ class IrrigationConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
     VERSION = 1
 
+    _reauth_entry: config_entries.ConfigEntry | None = None
+
     @staticmethod
     def _normalize_user_input(user_input: dict) -> dict:
         """Convert selector output into the types the integration expects."""
@@ -58,6 +62,104 @@ class IrrigationConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             normalized_input.get(CONF_FLUME_DEVICE_INDEX, 0)
         )
         return normalized_input
+
+    @staticmethod
+    def _build_schema(user_input: dict[str, Any] | None = None) -> vol.Schema:
+        """Build the shared schema used by initial setup and reauth."""
+        return vol.Schema(
+            {
+                vol.Required(
+                    CONF_FLUME_USER,
+                    default=(user_input or {}).get(CONF_FLUME_USER, vol.UNDEFINED),
+                ): selector.TextSelector(
+                    selector.TextSelectorConfig(
+                        type=selector.TextSelectorType.TEXT,
+                    ),
+                ),
+                vol.Required(CONF_FLUME_PASS): selector.TextSelector(
+                    selector.TextSelectorConfig(
+                        type=selector.TextSelectorType.PASSWORD,
+                    ),
+                ),
+                vol.Required(
+                    CONF_FLUME_CLIENT_ID,
+                    default=(user_input or {}).get(CONF_FLUME_CLIENT_ID, vol.UNDEFINED),
+                ): selector.TextSelector(
+                    selector.TextSelectorConfig(
+                        type=selector.TextSelectorType.TEXT,
+                    ),
+                ),
+                vol.Required(CONF_FLUME_CLIENT_SECRET): selector.TextSelector(
+                    selector.TextSelectorConfig(
+                        type=selector.TextSelectorType.PASSWORD,
+                    ),
+                ),
+                vol.Required(CONF_RACHIO_TOKEN): selector.TextSelector(
+                    selector.TextSelectorConfig(
+                        type=selector.TextSelectorType.PASSWORD,
+                    ),
+                ),
+                vol.Optional(
+                    CONF_FLUME_DEVICE_INDEX,
+                    default=(user_input or {}).get(CONF_FLUME_DEVICE_INDEX, 0),
+                ): selector.NumberSelector(
+                    selector.NumberSelectorConfig(
+                        min=0,
+                        mode=selector.NumberSelectorMode.BOX,
+                        step=1,
+                    ),
+                ),
+            }
+        )
+
+    async def async_step_reauth(
+        self,
+        entry_data: dict[str, Any],
+    ) -> config_entries.ConfigFlowResult:
+        """Start Home Assistant's reauthentication flow for an existing entry."""
+        entry_id = self.context.get("entry_id")
+        if not isinstance(entry_id, str):
+            return self.async_abort(reason="entry_id key not found in context")
+
+        self._reauth_entry = self.hass.config_entries.async_get_entry(entry_id)
+        return await self.async_step_reauth_confirm(entry_data)
+
+    async def async_step_reauth_confirm(
+        self,
+        user_input: dict[str, Any] | None = None,
+    ) -> config_entries.ConfigFlowResult:
+        """Collect replacement credentials and update the existing entry."""
+        errors: dict[str, str] = {}
+        if self._reauth_entry is None:
+            return self.async_abort(reason="reauth_entry not found")
+
+        merged_input = dict(self._reauth_entry.data)
+        merged_input.update(user_input or {})
+
+        if user_input is not None:
+            merged_input = self._normalize_user_input(merged_input)
+            try:
+                await self._test_credentials(merged_input)
+            except IrrigationMonitorApiClientAuthenticationError as exception:
+                LOGGER.warning(exception)
+                errors["base"] = "auth"
+            except IrrigationMonitorApiClientCommunicationError as exception:
+                LOGGER.error(exception)
+                errors["base"] = "connection"
+            except IrrigationMonitorApiClientError as exception:
+                LOGGER.exception(exception)
+                errors["base"] = "unknown"
+            else:
+                return self.async_update_reload_and_abort(
+                    self._reauth_entry,
+                    data_updates=merged_input,
+                )
+
+        return self.async_show_form(
+            step_id="reauth_confirm",
+            data_schema=self._build_schema(merged_input),
+            errors=errors,
+        )
 
     async def async_step_user(
         self,
@@ -96,53 +198,7 @@ class IrrigationConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         return self.async_show_form(
             step_id="user",
-            data_schema=vol.Schema(
-                {
-                    vol.Required(
-                        CONF_FLUME_USER,
-                        default=(user_input or {}).get(CONF_FLUME_USER, vol.UNDEFINED),
-                    ): selector.TextSelector(
-                        selector.TextSelectorConfig(
-                            type=selector.TextSelectorType.TEXT,
-                        ),
-                    ),
-                    vol.Required(CONF_FLUME_PASS): selector.TextSelector(
-                        selector.TextSelectorConfig(
-                            type=selector.TextSelectorType.PASSWORD,
-                        ),
-                    ),
-                    vol.Required(
-                        CONF_FLUME_CLIENT_ID,
-                        default=(user_input or {}).get(
-                            CONF_FLUME_CLIENT_ID, vol.UNDEFINED
-                        ),
-                    ): selector.TextSelector(
-                        selector.TextSelectorConfig(
-                            type=selector.TextSelectorType.TEXT,
-                        ),
-                    ),
-                    vol.Required(CONF_FLUME_CLIENT_SECRET): selector.TextSelector(
-                        selector.TextSelectorConfig(
-                            type=selector.TextSelectorType.PASSWORD,
-                        ),
-                    ),
-                    vol.Required(CONF_RACHIO_TOKEN): selector.TextSelector(
-                        selector.TextSelectorConfig(
-                            type=selector.TextSelectorType.PASSWORD,
-                        ),
-                    ),
-                    vol.Optional(
-                        CONF_FLUME_DEVICE_INDEX,
-                        default=(user_input or {}).get(CONF_FLUME_DEVICE_INDEX, 0),
-                    ): selector.NumberSelector(
-                        selector.NumberSelectorConfig(
-                            min=0,
-                            mode=selector.NumberSelectorMode.BOX,
-                            step=1,
-                        ),
-                    ),
-                }
-            ),
+            data_schema=self._build_schema(user_input),
             errors=errors,
         )
 
