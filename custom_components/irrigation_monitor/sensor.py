@@ -78,17 +78,15 @@ async def async_setup_entry(
         )
         for row in report
     )
-    async_add_entities(
-        [
-            IrrigationSystemWaterTotalSensor(
-                coordinator=entry.runtime_data.coordinator,
-            )
-        ]
-    )
+    async_add_entities([
+        IrrigationSystemWaterTotalSensor(
+            coordinator=entry.runtime_data.coordinator,
+        )
+    ])
 
 
 def _build_event_id(datapoint: WaterReportDataPoint) -> str:
-    """Build a stable identifier for one watering event."""
+    """Stable identifier for one watering event is the start time plus zone id."""
     start_time = datapoint.watering_start_time.isoformat()
     return f"{datapoint.zone_id}:{start_time}"
 
@@ -126,7 +124,11 @@ class IrrigationZoneReportEntity(IrrigationMonitorEntity, SensorEntity):
 
     @property
     def _event_id(self) -> str | None:
-        """Return a stable identifier for the latest watering event."""
+        """
+        Return a stable identifier for the latest watering event.
+
+        This is the watering event start time plus zone id.
+        """
         datapoint = self._report_datapoint
         if datapoint is None:
             return None
@@ -150,8 +152,6 @@ class IrrigationZoneReportEntity(IrrigationMonitorEntity, SensorEntity):
 
 class IrrigationZoneLastWateringSensor(IrrigationZoneReportEntity):
     """Represent the latest watering event marker for one zone."""
-
-    _attr_entity_registry_enabled_default = False
 
     def __init__(
         self,
@@ -264,7 +264,11 @@ class IrrigationZoneWaterTotalSensor(IrrigationZoneReportEntity, RestoreEntity):
         super()._handle_coordinator_update()
 
     def _apply_latest_event(self) -> None:
-        """Add the latest event once, keyed by the stable event identifier."""
+        """
+        Add the latest event once, keyed by the stable event identifier.
+
+        The stable event identifier is the start time plus zone id.
+        """
         datapoint = self._report_datapoint
         event_id = self._event_id
         if datapoint is None or event_id is None:
