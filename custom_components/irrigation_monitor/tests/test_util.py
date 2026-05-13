@@ -2,22 +2,27 @@
 
 from __future__ import annotations
 
-# ruff: noqa: S101, S106, TID252
+# ruff: noqa: S101, S106, TID252, ARG001, ARG002, ARG005, EM101, TRY003, PLR2004
 import datetime
 
 import pytest
+import requests
 from pydantic import ValidationError
 
 from .. import util  # for monkeypatching
 from ..util import (
     DeviceType,
+    FlumeAuthenticationError,
     FlumeDevice,
     FlumeRequestData,
     FlumeUsageQuery,
     IrrigationMonitorCredentials,
+    IrrigationMonitorRequestAuthError,
+    IrrigationMonitorRequestDNSError,
     RachioZoneWateringSummary,
     WaterReportDataPoint,
     _create_query_list,
+    _create_retry_session,
     poll_for_irrigation_usage,
 )
 
@@ -109,6 +114,102 @@ def test_water_report_data_point_gallons_per_minute(
     )
 
     assert datapoint.gallons_per_minute == expected_gpm
+
+
+def test_safe_request_classifies_unauthorized_http_errors() -> None:
+    """401/403 responses should be classified as authorization failures."""
+
+    class FakeResponse:
+        status_code = 401
+        text = '{"error":"invalid_client"}'
+
+        def raise_for_status(self) -> None:
+            raise requests.HTTPError("unauthorized", response=self)
+
+    class FakeSession:
+        def request(
+            self, *, method: str, url: str, timeout: int, **kwargs: object
+        ) -> FakeResponse:
+            assert method == "GET"
+            assert url == "https://example.com/oauth/token"
+            assert timeout == 10
+            return FakeResponse()
+
+    with pytest.raises(IrrigationMonitorRequestAuthError, match="authorization"):
+        util.safe_request(
+            "https://example.com/oauth/token",
+            session=FakeSession(),
+        )
+
+
+def test_safe_request_classifies_dns_errors() -> None:
+    """Name resolution failures should be exposed as DNS-specific errors."""
+
+    class FakeSession:
+        def request(
+            self, *, method: str, url: str, timeout: int, **kwargs: object
+        ) -> requests.Response:
+            raise requests.ConnectionError(
+                "HTTPSConnection(host='api.flumewater.com', port=443): "
+                "Failed to resolve 'api.flumewater.com' "
+                "([Errno -3] Try again)"
+            )
+
+    with pytest.raises(IrrigationMonitorRequestDNSError, match="DNS"):
+        util.safe_request(
+            "https://api.flumewater.com/oauth/token",
+            method="POST",
+            session=FakeSession(),
+        )
+
+
+def test_create_retry_session_mounts_post_retry_adapter() -> None:
+    """The shared session should mount adapters that retry transient POST requests."""
+    session = _create_retry_session()
+    adapter = session.get_adapter("https://api.flumewater.com")
+    retries = adapter.max_retries
+
+    assert retries.total == util.REQUEST_RETRY_ATTEMPTS
+    assert retries.connect == util.REQUEST_RETRY_ATTEMPTS
+    assert retries.read == util.REQUEST_RETRY_ATTEMPTS
+    assert retries.status == util.REQUEST_RETRY_ATTEMPTS
+    assert retries.backoff_factor == util.REQUEST_RETRY_BACKOFF_FACTOR
+    assert retries.allowed_methods == util.REQUEST_RETRYABLE_METHODS
+    assert retries.status_forcelist == util.REQUEST_RETRYABLE_STATUS_CODES
+
+
+def test_flume_client_rejects_unauthorized_token_response(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unauthorized Flume token requests should surface as auth errors."""
+
+    def fake_safe_request(*args: object, **kwargs: object) -> dict[str, object]:
+        raise IrrigationMonitorRequestAuthError("Request authorization failed")
+
+    monkeypatch.setattr(util, "safe_request", fake_safe_request)
+
+    with pytest.raises(FlumeAuthenticationError, match="credentials were rejected"):
+        util.FlumeClient(
+            flume_user="user@example.com",
+            flume_pass="secret",
+            flume_client="client-id",
+            flume_secret="client-secret",
+        )
+
+
+def test_flume_client_treats_missing_token_data_as_response_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Malformed Flume token payloads should not be treated as auth failures."""
+    monkeypatch.setattr(util, "safe_request", lambda *args, **kwargs: {})
+
+    with pytest.raises(util.FlumeTokenError, match="No data field"):
+        util.FlumeClient(
+            flume_user="user@example.com",
+            flume_pass="secret",
+            flume_client="client-id",
+            flume_secret="client-secret",
+        )
 
 
 def test_poll_for_irrigation_usage_merges_flume_results(
@@ -216,3 +317,70 @@ def test_poll_for_irrigation_usage_merges_flume_results(
     assert report[0].gallons_per_minute == expected_gallons_per_minute
     assert report[1].total_gallons_used is None
     assert report[1].gallons_per_minute is None
+
+
+def test_poll_for_irrigation_usage_handles_empty_flume_results(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Empty Flume result sets should leave measured usage unset, not crash."""
+    watering_windows = [
+        RachioZoneWateringSummary(
+            zone_id=1,
+            zone_name="Front Yard",
+            last_watering_start_time=datetime.datetime(
+                2024, 6, 1, 6, 0, tzinfo=datetime.UTC
+            ),
+            last_watering_stop_time=datetime.datetime(
+                2024, 6, 1, 6, 10, tzinfo=datetime.UTC
+            ),
+            last_watering_duration_minutes=10,
+            est_gallons_per_minute=4.0,
+            est_gallons_used=40.0,
+            sqft=100,
+            enabled=True,
+        )
+    ]
+
+    class FakeFlumeClient:
+        def __init__(self, **kwargs: object) -> None:
+            self.monitors = [
+                FlumeDevice(
+                    device_id="monitor-1",
+                    device_name="Main Monitor",
+                    device_timezone="US/Pacific",
+                    device_type=DeviceType.SENSOR,
+                )
+            ]
+
+        def query_usage(
+            self,
+            device_id: str,
+            queries: list[FlumeUsageQuery],
+        ) -> list[FlumeRequestData]:
+            return []
+
+    class FakeRachioClient:
+        def __init__(self, token: str) -> None:
+            self.token = token
+
+        def get_last_watered_summary(
+            self, *, local_timezone: str
+        ) -> list[RachioZoneWateringSummary]:
+            return watering_windows
+
+    monkeypatch.setattr(util, "FlumeClient", FakeFlumeClient)
+    monkeypatch.setattr(util, "RachioClient", FakeRachioClient)
+
+    report = poll_for_irrigation_usage(
+        IrrigationMonitorCredentials(
+            flume_user="user@example.com",
+            flume_pass="secret",
+            flume_client_id="client-id",
+            flume_client_secret="client-secret",
+            rachio_token="rachio-token",
+        )
+    )
+
+    assert len(report) == 1
+    assert report[0].zone_name == "Front Yard"
+    assert report[0].total_gallons_used is None
