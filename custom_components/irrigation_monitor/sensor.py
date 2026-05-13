@@ -289,7 +289,6 @@ class IrrigationSystemWaterTotalSensor(
 ):
     """Represent the cumulative gallons observed across all irrigation zones."""
 
-    _attr_entity_registry_enabled_default = False
     _attr_device_class = SensorDeviceClass.WATER
     _attr_native_unit_of_measurement = UnitOfVolume.GALLONS
     _attr_state_class = SensorStateClass.TOTAL_INCREASING
